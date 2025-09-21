@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2011-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2022-2023, Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2022-2024, Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <linux/cdev.h>
@@ -93,6 +93,21 @@
 #define DDR_STATS_IOCTL		_IOR(SUBSYSTEM_STATS_MAGIC_NUM, 13, \
 				     struct sleep_stats *)
 
+enum subsystem_smem_id {
+	AOSD = 0,
+	CXSD = 1,
+	DDR = 2,
+	DDR_STATS = 3,
+	MPSS = 605,
+	ADSP,
+	CDSP,
+	SLPI,
+	GPU,
+	DISPLAY,
+	SLPI_ISLAND = 613,
+	APSS = 631,
+};
+
 struct subsystem_data {
 	const char *name;
 	u32 smem_item;
@@ -105,6 +120,9 @@ static struct subsystem_data subsystems[] = {
 	{ "wpss", 605, 13 },
 	{ "adsp", 606, 2 },
 	{ "cdsp", 607, 5 },
+	{ "cdsp1", 607, 12 },
+	{ "gpdsp0", 607, 17 },
+	{ "gpdsp1", 607, 18 },
 	{ "slpi", 608, 3 },
 	{ "gpu", 609, 0 },
 	{ "display", 610, 0 },
@@ -146,6 +164,7 @@ struct stats_drvdata {
 };
 
 static struct stats_drvdata *drv;
+static u64 deep_sleep_last_exited_time;
 
 struct sleep_stats {
 	u32 stat_type;
@@ -175,26 +194,61 @@ static bool subsystem_stats_debug_on;
 /* Subsystem stats before and after suspend */
 static struct sleep_stats *b_subsystem_stats;
 static struct sleep_stats *a_subsystem_stats;
+static struct sleep_stats *c_subsystem_stats;
 /* System sleep stats before and after suspend */
 static struct sleep_stats *b_system_stats;
 static struct sleep_stats *a_system_stats;
 static DEFINE_MUTEX(sleep_stats_mutex);
 
+static int subsystem_sleep_stats(struct sleep_stats *stats,
+					unsigned int pid, unsigned int idx, unsigned int index)
+{
+	struct sleep_stats *subsystems_data;
+
+	if (pid == SUBSYSTEM_STATS_OTHERS_NUM)
+		memcpy_fromio(stats, drv->d[index].base, sizeof(*stats));
+	else {
+		subsystems_data = qcom_smem_get(pid, idx, NULL);
+		if (IS_ERR(subsystems_data))
+			return -ENODEV;
+
+		stats->count = subsystems_data->count;
+		stats->last_entered_at = subsystems_data->last_entered_at;
+		stats->last_exited_at = subsystems_data->last_exited_at;
+		stats->accumulated = subsystems_data->accumulated;
+	}
+
+	return 0;
+}
+
+static inline void get_sleep_stat_name(u32 type, char *stat_type)
+{
+	int i;
+
+	for (i = 0; i < sizeof(u32); i++) {
+		stat_type[i] = type & 0xff;
+		type = type >> 8;
+	}
+	strim(stat_type);
+}
+
 bool has_system_slept(void)
 {
 	int i;
 	bool sleep_flag = true;
+	char stat_type[sizeof(u32) + 1] = {0};
 
 	for (i = 0; i < drv->config->num_records; i++) {
 		if (b_system_stats[i].count == a_system_stats[i].count) {
-			pr_warn("System %s has not entered sleep\n", a_system_stats[i].stat_type);
+			get_sleep_stat_name(b_system_stats[i].stat_type, stat_type);
+			pr_warn("System %s has not entered sleep\n", stat_type);
 			sleep_flag = false;
 		}
 	}
 
 	return sleep_flag;
 }
-EXPORT_SYMBOL(has_system_slept);
+EXPORT_SYMBOL_GPL(has_system_slept);
 
 bool has_subsystem_slept(void)
 {
@@ -215,13 +269,34 @@ bool has_subsystem_slept(void)
 
 	return sleep_flag;
 }
-EXPORT_SYMBOL(has_subsystem_slept);
+EXPORT_SYMBOL_GPL(has_subsystem_slept);
+
+bool current_subsystem_sleep(void)
+{
+	int i, ret;
+	bool sleep_flag = true;
+
+	for (i = 0; i < ARRAY_SIZE(subsystems); i++) {
+		ret = subsystem_sleep_stats(c_subsystem_stats + i,
+					subsystems[i].pid, subsystems[i].smem_item, i);
+		if (ret != -ENODEV && subsystems[i].smem_item != APSS) {
+			if (c_subsystem_stats[i].last_exited_at >
+					c_subsystem_stats[i].last_entered_at) {
+				pr_warn("Subsystem %s not in sleep\n", subsystems[i].name);
+				sleep_flag = false;
+				break;
+			}
+		}
+	}
+	return sleep_flag;
+}
+EXPORT_SYMBOL_GPL(current_subsystem_sleep);
 
 void subsystem_sleep_debug_enable(bool enable)
 {
 	subsystem_stats_debug_on = enable;
 }
-EXPORT_SYMBOL(subsystem_sleep_debug_enable);
+EXPORT_SYMBOL_GPL(subsystem_sleep_debug_enable);
 
 static inline int qcom_stats_copy_to_user(unsigned long arg, struct sleep_stats *stats,
 					  unsigned long size)
@@ -258,6 +333,40 @@ static bool ddr_stats_is_freq_overtime(struct sleep_stats *data)
 
 	return false;
 }
+
+uint64_t get_aosd_sleep_exit_time(void)
+{
+	int i;
+	u64 last_exited_at;
+	u32 count;
+	static u32 saved_deep_sleep_count;
+	u32 s_type = 0;
+	char stat_type[5] = {0};
+
+	for (i = 0; i < drv->config->num_records; i++) {
+		s_type = readl_relaxed(drv->d[i].base);
+		memcpy(stat_type, &s_type, sizeof(u32));
+		strim(stat_type);
+
+		if (!memcmp((const void *)stat_type, (const void *)"aosd", 4)) {
+			count = readl_relaxed(drv->d[i].base + COUNT_OFFSET);
+
+			if (saved_deep_sleep_count == count)
+				deep_sleep_last_exited_time = 0;
+			else {
+				saved_deep_sleep_count = count;
+				last_exited_at = readq_relaxed(drv->d[i].base +
+				LAST_EXITED_AT_OFFSET);
+				deep_sleep_last_exited_time = last_exited_at;
+			}
+			break;
+
+		}
+	}
+
+	return deep_sleep_last_exited_time;
+}
+EXPORT_SYMBOL_GPL(get_aosd_sleep_exit_time);
 
 static u64 qcom_stats_fill_ddr_stats(void __iomem *reg, struct sleep_stats *data, u32 *entry_count)
 {
@@ -891,7 +1000,7 @@ static void qcom_create_soc_sleep_stat_files(struct dentry *root, void __iomem *
 	char stat_type[sizeof(u32) + 1] = {0};
 	size_t stats_offset = config->stats_offset;
 	u32 offset = 0, type;
-	int i, j;
+	int i;
 
 	/*
 	 * On RPM targets, stats offset location is dynamic and changes from target
@@ -916,11 +1025,7 @@ static void qcom_create_soc_sleep_stat_files(struct dentry *root, void __iomem *
 		 * For rpm-sleep-stats: "vmin" and "vlow".
 		 */
 		type = readl(d[i].base);
-		for (j = 0; j < sizeof(u32); j++) {
-			stat_type[j] = type & 0xff;
-			type = type >> 8;
-		}
-		strim(stat_type);
+		get_sleep_stat_name(type, stat_type);
 		debugfs_create_file(stat_type, 0400, root, &d[i],
 				    &qcom_soc_sleep_stats_fops);
 
@@ -1029,6 +1134,13 @@ static int qcom_stats_probe(struct platform_device *pdev)
 		goto fail;
 	}
 
+	c_subsystem_stats = devm_kcalloc(&pdev->dev, ARRAY_SIZE(subsystems),
+					 sizeof(struct sleep_stats), GFP_KERNEL);
+	if (!c_subsystem_stats) {
+		ret = -ENOMEM;
+		goto fail;
+	}
+
 	b_system_stats = devm_kcalloc(&pdev->dev, drv->config->num_records,
 					sizeof(struct sleep_stats), GFP_KERNEL);
 	if (!b_system_stats) {
@@ -1085,9 +1197,10 @@ static int qcom_stats_suspend(struct device *dev)
 	mutex_lock(&sleep_stats_mutex);
 	for (i = 0; i < ARRAY_SIZE(subsystems); i++) {
 		tmp = qcom_smem_get(subsystems[i].pid, subsystems[i].smem_item, NULL);
-		if (IS_ERR(b_subsystem_stats + i))
+		if (IS_ERR(tmp)) {
 			subsystems[i].not_present = true;
-		else
+			continue;
+		} else
 			subsystems[i].not_present = false;
 		qcom_stats_copy(tmp, b_subsystem_stats + i);
 	}
@@ -1116,7 +1229,11 @@ static int qcom_stats_resume(struct device *dev)
 
 	mutex_lock(&sleep_stats_mutex);
 	for (i = 0; i < ARRAY_SIZE(subsystems); i++) {
+		if (subsystems[i].not_present)
+			continue;
 		tmp = qcom_smem_get(subsystems[i].pid, subsystems[i].smem_item, NULL);
+		if (IS_ERR(tmp))
+			continue;
 		qcom_stats_copy(tmp, a_subsystem_stats + i);
 	}
 

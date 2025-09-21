@@ -18,6 +18,7 @@
 #include "qcom_common.h"
 
 #define SYSMON_NOTIF_TIMEOUT CONFIG_RPROC_SYSMON_NOTIF_TIMEOUT
+#define SYSMON_SHUTDOWN_NOTIF_TIMEOUT CONFIG_RPROC_SYSMON_SHUTDOWN_NOTIF_TIMEOUT
 
 #define SYSMON_SUBDEV_NAME "sysmon"
 
@@ -212,9 +213,10 @@ struct ssctl_subsys_event_with_tid_req {
 	u8 subsys_name_len;
 	char subsys_name[SSCTL_SUBSYS_NAME_LENGTH];
 	u32 event;
-	uint32_t transaction_id;
 	u8 evt_driven_valid;
 	u32 evt_driven;
+	u8 transaction_id_valid;
+	uint32_t transaction_id;
 };
 
 static struct qmi_elem_info ssctl_subsys_event_with_tid_req_ei[] = {
@@ -246,6 +248,16 @@ static struct qmi_elem_info ssctl_subsys_event_with_tid_req_ei[] = {
 		.tlv_type	= 0x02,
 		.offset		= offsetof(struct ssctl_subsys_event_with_tid_req,
 					   event),
+		.ei_array	= NULL,
+	},
+	{
+		.data_type	= QMI_OPT_FLAG,
+		.elem_len	= 1,
+		.elem_size	= sizeof(uint8_t),
+		.array_type	= NO_ARRAY,
+		.tlv_type	= 0x03,
+		.offset		= offsetof(struct ssctl_subsys_event_with_tid_req,
+					   transaction_id_valid),
 		.ei_array	= NULL,
 	},
 	{
@@ -392,22 +404,22 @@ static bool ssctl_request_shutdown(struct qcom_sysmon *sysmon)
  * @sysmon:	sysmon context
  * @event:	sysmon event context
  */
-static void ssctl_send_event(struct qcom_sysmon *sysmon,
-			     const struct qcom_sysmon *source)
+static int ssctl_send_event(struct qcom_sysmon *sysmon,
+			     const struct qcom_sysmon *source, bool is_tid_valid)
 {
 	struct ssctl_subsys_event_with_tid_resp resp;
 	struct ssctl_subsys_event_with_tid_req req;
 	struct qmi_txn txn;
-	int ret;
+	int ret, ssctl_event;
 
 	if (sysmon->ssctl_instance == -EINVAL)
-		return;
+		return -EINVAL;
 
 	memset(&resp, 0, sizeof(resp));
 	ret = qmi_txn_init(&sysmon->qmi, &txn, ssctl_subsys_event_with_tid_resp_ei, &resp);
 	if (ret < 0) {
 		dev_err(sysmon->dev, "failed to allocate QMI txn\n");
-		return;
+		return ret;
 	}
 
 	memset(&req, 0, sizeof(req));
@@ -416,26 +428,34 @@ static void ssctl_send_event(struct qcom_sysmon *sysmon,
 	req.event = source->state;
 	req.evt_driven_valid = true;
 	req.evt_driven = SSCTL_SSR_EVENT_FORCED;
+	req.transaction_id_valid = is_tid_valid ? false : true;
 	req.transaction_id = sysmon->transaction_id;
+	ssctl_event = is_tid_valid ? SSCTL_SUBSYS_EVENT_REQ : SSCTL_SUBSYS_EVENT_WITH_TID_REQ;
 
 	ret = qmi_send_request(&sysmon->qmi, &sysmon->ssctl, &txn,
-			       SSCTL_SUBSYS_EVENT_WITH_TID_REQ, 40,
-			       ssctl_subsys_event_with_tid_req_ei, &req);
+			       ssctl_event, 40, ssctl_subsys_event_with_tid_req_ei, &req);
 	if (ret < 0) {
 		dev_err(sysmon->dev, "failed to send shutdown request\n");
 		qmi_txn_cancel(&txn);
-		return;
+		return ret;
 	}
 
 	ret = qmi_txn_wait(&txn, 5 * HZ);
-	if (ret < 0)
+	if (ret < 0) {
 		dev_err(sysmon->dev, "failed receiving QMI response\n");
-	else if (resp.resp.result)
-		dev_err(sysmon->dev, "failed to receive %s ssr %s event. response result: %d\n",
+		return ret;
+	}
+
+	if (resp.resp.result) {
+		dev_err(sysmon->dev, "failed to receive %s ssr %s event. response result: %d error: %d\n",
 			source->name, subdevice_state_string[source->state],
-			resp.resp.result);
-	else
-		dev_dbg(sysmon->dev, "ssr event send completed\n");
+			resp.resp.result, resp.resp.error);
+		return resp.resp.result;
+	}
+
+	dev_dbg(sysmon->dev, "ssr event send completed\n");
+
+	return 0;
 }
 
 /**
@@ -516,19 +536,13 @@ static void sysmon_shutdown_notif_timeout_handler(struct timer_list *t)
 	struct notif_timeout_data *td = from_timer(td, t, timer);
 	struct qcom_sysmon *sysmon = container_of(td, struct qcom_sysmon, timeout_data);
 
-	if (IS_ENABLED(CONFIG_QCOM_PANIC_ON_NOTIF_TIMEOUT) &&
-	    system_state != SYSTEM_RESTART &&
-	    system_state != SYSTEM_POWER_OFF &&
-	    system_state != SYSTEM_HALT &&
-	    !qcom_device_shutdown_in_progress)
-		panic(shutdown_timeout_msg, sysmon->name);
-	else
-		WARN(1, shutdown_timeout_msg, sysmon->name);
+	WARN(1, shutdown_timeout_msg, sysmon->name);
 }
 
 static inline void send_event(struct qcom_sysmon *sysmon, struct qcom_sysmon *source)
 {
 	unsigned long timeout;
+	int ret;
 
 	source->timeout_data.timer.function = sysmon_notif_timeout_handler;
 	source->timeout_data.dest = sysmon;
@@ -536,8 +550,17 @@ static inline void send_event(struct qcom_sysmon *sysmon, struct qcom_sysmon *so
 	mod_timer(&source->timeout_data.timer, timeout);
 
 	/* Only SSCTL version 2 supports SSR events */
-	if (sysmon->ssctl_version == 2)
-		ssctl_send_event(sysmon, source);
+	if (sysmon->ssctl_version == 2) {
+		ret = ssctl_send_event(sysmon, source, false);
+		if (ret == QMI_RESULT_FAILURE_V01) {
+			/* Retry with older ssctl event */
+			dev_dbg(sysmon->dev, "Retrying with no trascation id request\n");
+			ret = ssctl_send_event(sysmon, source, true);
+		}
+		/* if ret !=1 we don't retry */
+		if (ret)
+			pr_err("Failed to send event\n");
+	}
 	else if (sysmon->ept)
 		sysmon_send_event(sysmon, source);
 
@@ -624,14 +647,14 @@ static void sysmon_stop(struct rproc_subdev *subdev, bool crashed)
 		return;
 
 	sysmon->timeout_data.timer.function = sysmon_shutdown_notif_timeout_handler;
-	timeout = jiffies + msecs_to_jiffies(SYSMON_NOTIF_TIMEOUT);
-	mod_timer(&sysmon->timeout_data.timer, timeout);
+	timeout = jiffies + msecs_to_jiffies(SYSMON_SHUTDOWN_NOTIF_TIMEOUT);
 
 	if (sysmon->ssctl_instance) {
 		if (!wait_for_completion_timeout(&sysmon->ssctl_comp, HZ / 2))
 			dev_err(sysmon->dev, "timeout waiting for ssctl service\n");
 	}
 
+	mod_timer(&sysmon->timeout_data.timer, timeout);
 	if (sysmon->ssctl_version)
 		sysmon->shutdown_acked = ssctl_request_shutdown(sysmon);
 	else if (sysmon->ept)

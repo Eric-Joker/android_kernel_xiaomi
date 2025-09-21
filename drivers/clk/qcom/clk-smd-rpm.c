@@ -2,7 +2,7 @@
 /*
  * Copyright (c) 2016, Linaro Limited
  * Copyright (c) 2014, The Linux Foundation. All rights reserved.
- * Copyright (c) 2023, Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2023-2024, Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <linux/clk-provider.h>
@@ -23,6 +23,7 @@
 #include <dt-bindings/clock/qcom,rpmcc.h>
 
 #include "clk-debug.h"
+#include "common.h"
 
 #define QCOM_RPM_KEY_SOFTWARE_ENABLE			0x6e657773
 #define QCOM_RPM_KEY_PIN_CTRL_CLK_BUFFER_ENABLE_KEY	0x62636370
@@ -1362,8 +1363,6 @@ DEFINE_CLK_SMD_RPM_BRANCH(holi, bimc_freq_log, bimc_freq_log_a,
 /* SMD_XO_BUFFER */
 DEFINE_CLK_SMD_RPM_XO_BUFFER(holi, ln_bb_clk2, ln_bb_clk2_a,
 						QCOM_SMD_RPM_CLK_BUF_G, 8);
-DEFINE_CLK_SMD_RPM_XO_BUFFER(holi, ln_bb_clk3, ln_bb_clk3_a,
-						QCOM_SMD_RPM_CLK_BUF_G, 9);
 DEFINE_CLK_SMD_RPM_XO_BUFFER(holi, rf_clk5, rf_clk5_a,
 						QCOM_SMD_RPM_CLK_BUF_G, 6);
 
@@ -1378,8 +1377,6 @@ static struct clk_hw *holi_clks[] = {
 	[RPM_SMD_QDSS_A_CLK] = &holi_qdss_a_clk.hw,
 	[RPM_SMD_LN_BB_CLK2] = &holi_ln_bb_clk2.hw,
 	[RPM_SMD_LN_BB_CLK2_A] = &holi_ln_bb_clk2_a.hw,
-	[RPM_SMD_LN_BB_CLK3] = &holi_ln_bb_clk3.hw,
-	[RPM_SMD_LN_BB_CLK3_A] = &holi_ln_bb_clk3_a.hw,
 	[RPM_SMD_RF_CLK5] = &holi_rf_clk5.hw,
 	[RPM_SMD_RF_CLK5_A] = &holi_rf_clk5_a.hw,
 	[RPM_SMD_CNOC_CLK] = &holi_cnoc_clk.hw,
@@ -1410,6 +1407,54 @@ static const struct rpm_smd_clk_desc rpm_clk_holi = {
 	.num_clks = ARRAY_SIZE(holi_clks),
 };
 
+/* Pitti */
+DEFINE_CLK_SMD_RPM_XO_BUFFER(pitti, rf_clk1, rf_clk1_a, QCOM_SMD_RPM_CLK_BUF_A, 4);
+DEFINE_CLK_SMD_RPM_XO_BUFFER(pitti, rf_clk2, rf_clk2_a, QCOM_SMD_RPM_CLK_BUF_A, 5);
+DEFINE_CLK_SMD_RPM_XO_BUFFER(pitti, rf_clk3, rf_clk3_a, QCOM_SMD_RPM_CLK_BUF_G, 6);
+
+static struct clk_hw *pitti_clks[] = {
+	[RPM_SMD_XO_CLK_SRC] = &holi_bi_tcxo.hw,
+	[RPM_SMD_XO_A_CLK_SRC] = &holi_bi_tcxo_ao.hw,
+	[RPM_SMD_SNOC_CLK] = &holi_snoc_clk.hw,
+	[RPM_SMD_SNOC_A_CLK] = &holi_snoc_a_clk.hw,
+	[RPM_SMD_BIMC_CLK] = &holi_bimc_clk.hw,
+	[RPM_SMD_BIMC_A_CLK] = &holi_bimc_a_clk.hw,
+	[RPM_SMD_QDSS_CLK] = &holi_qdss_clk.hw,
+	[RPM_SMD_QDSS_A_CLK] = &holi_qdss_a_clk.hw,
+	[RPM_SMD_RF_CLK1] = &pitti_rf_clk1.hw,
+	[RPM_SMD_RF_CLK1_A] = &pitti_rf_clk1_a.hw,
+	[RPM_SMD_RF_CLK2] = &pitti_rf_clk2.hw,
+	[RPM_SMD_RF_CLK2_A] = &pitti_rf_clk2_a.hw,
+	[RPM_SMD_RF_CLK3] = &pitti_rf_clk3.hw,
+	[RPM_SMD_RF_CLK3_A] = &pitti_rf_clk3_a.hw,
+	[RPM_SMD_CNOC_CLK] = &holi_cnoc_clk.hw,
+	[RPM_SMD_CNOC_A_CLK] = &holi_cnoc_a_clk.hw,
+	[RPM_SMD_IPA_CLK] = &holi_ipa_clk.hw,
+	[RPM_SMD_IPA_A_CLK] = &holi_ipa_a_clk.hw,
+	[RPM_SMD_QUP_CLK] = &holi_qup_clk.hw,
+	[RPM_SMD_QUP_A_CLK] = &holi_qup_a_clk.hw,
+	[RPM_SMD_MMRT_CLK] = &holi_mmrt_clk.hw,
+	[RPM_SMD_MMRT_A_CLK] = &holi_mmrt_a_clk.hw,
+	[RPM_SMD_MMNRT_CLK] = &holi_mmnrt_clk.hw,
+	[RPM_SMD_MMNRT_A_CLK] = &holi_mmnrt_a_clk.hw,
+	[RPM_SMD_SNOC_PERIPH_CLK] = &holi_snoc_periph_clk.hw,
+	[RPM_SMD_SNOC_PERIPH_A_CLK] = &holi_snoc_periph_a_clk.hw,
+	[RPM_SMD_SNOC_LPASS_CLK] = &holi_snoc_lpass_clk.hw,
+	[RPM_SMD_SNOC_LPASS_A_CLK] = &holi_snoc_lpass_a_clk.hw,
+	[RPM_SMD_CE1_CLK] = &holi_ce1_clk.hw,
+	[RPM_SMD_CE1_A_CLK] = &holi_ce1_a_clk.hw,
+	[RPM_SMD_BIMC_GPU_CLK] = &qcm2290_bimc_gpu_clk.hw,
+	[RPM_SMD_BIMC_GPU_A_CLK] = &qcm2290_bimc_gpu_a_clk.hw,
+	[RPM_SMD_CPUSS_GNOC_CLK] = &qcm2290_cpuss_gnoc_clk.hw,
+	[RPM_SMD_CPUSS_GNOC_A_CLK] = &qcm2290_cpuss_gnoc_a_clk.hw,
+};
+
+static const struct rpm_smd_clk_desc rpm_clk_pitti = {
+	.clks = pitti_clks,
+	.num_clks = ARRAY_SIZE(pitti_clks),
+};
+
+
 static const struct of_device_id rpm_smd_clk_match_table[] = {
 	{ .compatible = "qcom,rpmcc-mdm9607", .data = &rpm_clk_mdm9607 },
 	{ .compatible = "qcom,rpmcc-msm8226", .data = &rpm_clk_msm8974 },
@@ -1430,6 +1475,7 @@ static const struct of_device_id rpm_smd_clk_match_table[] = {
 	{ .compatible = "qcom,rpmcc-sm6125",  .data = &rpm_clk_sm6125  },
 	{ .compatible = "qcom,rpmcc-sm6375",  .data = &rpm_clk_sm6375  },
 	{ .compatible = "qcom,rpmcc-holi", .data = &rpm_clk_holi},
+	{ .compatible = "qcom,rpmcc-pitti", .data = &rpm_clk_pitti},
 	{ }
 };
 MODULE_DEVICE_TABLE(of, rpm_smd_clk_match_table);
@@ -1488,7 +1534,7 @@ static int rpm_smd_clk_probe(struct platform_device *pdev)
 {
 	struct clk_hw **hw_clks;
 	const struct rpm_smd_clk_desc *desc;
-	int ret, i, is_holi;
+	int ret, i, is_holi, is_pitti, is_mdm9607, hw_clk_handoff = false;
 
 	desc = of_device_get_match_data(&pdev->dev);
 	if (!desc)
@@ -1496,7 +1542,14 @@ static int rpm_smd_clk_probe(struct platform_device *pdev)
 
 	is_holi = of_device_is_compatible(pdev->dev.of_node,
 						"qcom,rpmcc-holi");
-	if (is_holi) {
+
+	is_pitti = of_device_is_compatible(pdev->dev.of_node,
+						"qcom,rpmcc-pitti");
+
+	is_mdm9607 = of_device_is_compatible(pdev->dev.of_node,
+						"qcom,rpmcc-mdm9607");
+
+	if (is_holi || is_pitti || is_mdm9607) {
 		ret = clk_vote_bimc(&holi_bimc_clk.hw, INT_MAX);
 		if (ret < 0)
 			return ret;
@@ -1504,13 +1557,17 @@ static int rpm_smd_clk_probe(struct platform_device *pdev)
 
 	hw_clks = desc->clks;
 
-	for (i = 0; i < desc->num_clks; i++) {
-		if (!hw_clks[i])
-			continue;
+	hw_clk_handoff = of_property_read_bool(pdev->dev.of_node,
+						"qcom,hw-clk-handoff");
+	if (hw_clk_handoff) {
+		for (i = 0; i < desc->num_clks; i++) {
+			if (!hw_clks[i])
+				continue;
 
-		ret = clk_smd_rpm_handoff(hw_clks[i]);
-		if (ret)
-			goto err;
+			ret = clk_smd_rpm_handoff(hw_clks[i]);
+			if (ret)
+				goto err;
+		}
 	}
 
 	ret = clk_smd_rpm_enable_scaling();
@@ -1529,6 +1586,11 @@ static int rpm_smd_clk_probe(struct platform_device *pdev)
 			dev_err(&pdev->dev, "Failed to register %s\n", name);
 			return ret;
 		}
+
+		ret = clk_hw_debug_register(&pdev->dev, hw_clks[i]);
+		if (ret)
+			dev_warn(&pdev->dev, "Failed to add %s to debug list\n",
+									name);
 	}
 
 	ret = devm_of_clk_add_hw_provider(&pdev->dev, qcom_smdrpm_clk_hw_get,
@@ -1536,7 +1598,7 @@ static int rpm_smd_clk_probe(struct platform_device *pdev)
 	if (ret)
 		goto err;
 
-	if (is_holi) {
+	if (is_holi || is_pitti) {
 		/*
 		 * Keep an active vote on CXO in case no other driver
 		 * votes for it.
@@ -1550,6 +1612,23 @@ static int rpm_smd_clk_probe(struct platform_device *pdev)
 		/* Hold an active set vote for the snoc_keepalive_a_clk */
 		clk_set_rate(holi_snoc_a_clk.hw.clk, 19200000);
 		clk_prepare_enable(holi_snoc_a_clk.hw.clk);
+
+		/* Hold an active set vote for qup clock */
+		clk_prepare_enable(holi_qup_a_clk.hw.clk);
+		clk_set_rate(holi_qup_a_clk.hw.clk, 19200000);
+	}
+
+	if (is_mdm9607) {
+		/*
+		 * Keep an active vote on CXO in case no other driver
+		 * votes for it.
+		 */
+		clk_prepare_enable(sdm660_bi_tcxo_a.hw.clk);
+
+		/* Hold an active set vote for the pcnoc_keepalive_a_clk */
+		clk_prepare_enable(msm8916_pcnoc_a_clk.hw.clk);
+		clk_set_rate(msm8916_pcnoc_a_clk.hw.clk, 19200000);
+
 	}
 
 	if (of_property_read_bool(pdev->dev.of_node, "qcom,bimc-log-stop"))

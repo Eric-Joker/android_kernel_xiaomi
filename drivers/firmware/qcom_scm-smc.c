@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Copyright (c) 2015,2019 The Linux Foundation. All rights reserved.
- * Copyright (c) 2022-2023 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2022-2024 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <linux/io.h>
@@ -118,7 +118,7 @@ int scm_get_wq_ctx(u32 *wq_ctx, u32 *flags, u32 *more_pending)
 }
 
 static int scm_smc_do_quirk(struct device *dev, struct arm_smccc_args *smc,
-		    struct arm_smccc_res *res, const bool multi_smc_call)
+		    struct arm_smccc_res *res)
 {
 	struct completion *wq = NULL;
 	struct qcom_scm *qscm;
@@ -145,32 +145,20 @@ static int scm_smc_do_quirk(struct device *dev, struct arm_smccc_args *smc,
 			}
 
 			if (res->a0 == QCOM_SCM_WAITQ_SLEEP) {
-				if (multi_smc_call)
-					mutex_unlock(&qcom_scm_lock);
 				wait_for_completion(wq);
-				if (multi_smc_call)
-					mutex_lock(&qcom_scm_lock);
 				fill_wq_resume_args(smc, smc_call_ctx);
-				wq = NULL;
 				continue;
 			} else {
 				fill_wq_wake_ack_args(smc, smc_call_ctx);
+				scm_waitq_flag_handler(wq, flags);
 				continue;
 			}
 		} else if ((long)res->a0 < 0) {
 			/* Error, return to caller with original SMC call */
 			*smc = original;
 			break;
-		} else {
-			/*
-			 * Success.
-			 * wq will be set only if a prior WAKE happened.
-			 * Its value will be the one from the prior WAKE.
-			 */
-			if (wq)
-				scm_waitq_flag_handler(wq, flags);
-			break;
-		}
+		} else
+			return 0;
 	} while (IS_WAITQ_SLEEP_OR_WAKE(res));
 
 	return 0;
@@ -190,9 +178,13 @@ static int __scm_smc_do(struct device *dev, struct arm_smccc_args *smc,
 	}
 
 	do {
-		mutex_lock(&qcom_scm_lock);
-		ret = scm_smc_do_quirk(dev, smc, res, multi_smc_call);
-		mutex_unlock(&qcom_scm_lock);
+		if (!multi_smc_call)
+			mutex_lock(&qcom_scm_lock);
+		down(&qcom_scm_sem_lock);
+		ret = scm_smc_do_quirk(dev, smc, res);
+		up(&qcom_scm_sem_lock);
+		if (!multi_smc_call)
+			mutex_unlock(&qcom_scm_lock);
 		if (ret)
 			return ret;
 
@@ -224,6 +216,9 @@ int __scm_smc_call(struct device *dev, const struct qcom_scm_desc *desc,
 	struct arm_smccc_res smc_res;
 	struct arm_smccc_args smc = {0};
 
+	if (!dev)
+		return -EPROBE_DEFER;
+
 	smc.args[0] = ARM_SMCCC_CALL_VAL(
 		smccc_call_type,
 		qcom_smccc_convention,
@@ -234,9 +229,6 @@ int __scm_smc_call(struct device *dev, const struct qcom_scm_desc *desc,
 		smc.args[i + SCM_SMC_FIRST_REG_IDX] = desc->args[i];
 
 	if (unlikely(arglen > SCM_SMC_N_REG_ARGS)) {
-		if (!dev)
-			return -EPROBE_DEFER;
-
 		alloc_len = SCM_SMC_N_EXT_ARGS * sizeof(u64);
 		use_qtee_shmbridge = qtee_shmbridge_is_enabled();
 		if (use_qtee_shmbridge) {

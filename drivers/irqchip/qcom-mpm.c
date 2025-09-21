@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2010-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2022-2023, Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2022-2024, Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <linux/delay.h>
@@ -423,9 +423,12 @@ static inline void msm_mpm_send_interrupt(void)
 	wmb();
 }
 
-static inline void msm_mpm_timer_write(void)
+void msm_mpm_timer_write(uint64_t counter)
 {
 	u32 lo = ~0U, hi = ~0U, ctrl;
+
+	lo = lower_32_bits(counter);
+	hi = upper_32_bits(counter);
 
 	ctrl = readl_relaxed(msm_mpm_dev_data.timer_frame_reg + MPM_CNTV_CTL);
 	if (ctrl & MPM_ARCH_TIMER_CTRL_ENABLE) {
@@ -443,7 +446,7 @@ int msm_mpm_enter_sleep(struct cpumask *cpumask)
 	struct irq_chip *irq_chip;
 	struct irq_data *irq_data;
 
-	msm_mpm_timer_write();
+	msm_mpm_timer_write(~0ULL);
 
 	for (i = 0; i < QCOM_MPM_REG_WIDTH; i++)
 		msm_mpm_write(MPM_REG_STATUS, i, 0);
@@ -463,7 +466,7 @@ int msm_mpm_enter_sleep(struct cpumask *cpumask)
 
 	return 0;
 }
-EXPORT_SYMBOL(msm_mpm_enter_sleep);
+EXPORT_SYMBOL_GPL(msm_mpm_enter_sleep);
 
 /*
  * Triggered by RPM when system resumes from deep sleep
@@ -476,6 +479,7 @@ static irqreturn_t msm_mpm_irq(int irq, void *dev_id)
 	unsigned int mpm_irq;
 	struct irq_desc *desc = NULL;
 	unsigned int reg = MPM_REG_ENABLE;
+	bool pending_status;
 
 	for (i = 0; i < QCOM_MPM_REG_WIDTH; i++) {
 		value[i] = msm_mpm_read(reg, i);
@@ -493,9 +497,14 @@ static irqreturn_t msm_mpm_irq(int irq, void *dev_id)
 			desc = apps_irq ?
 				irq_to_desc(apps_irq) : NULL;
 
-			if (desc && !irqd_is_level_type(&desc->irq_data))
-				irq_set_irqchip_state(apps_irq,
+			if (desc && !irqd_is_level_type(&desc->irq_data)) {
+				irq_get_irqchip_state(apps_irq,
+						IRQCHIP_STATE_PENDING, &pending_status);
+
+				if (!pending_status)
+					irq_set_irqchip_state(apps_irq,
 						IRQCHIP_STATE_PENDING, true);
+			}
 
 		}
 
@@ -583,6 +592,17 @@ reg_base_err:
 	return ret;
 }
 
+const struct mpm_pin mpm_pitti_gic_chip_data[] = {
+	{5, 296}, /* lpass_irq_out_sdc */
+	{12, 422}, /* qmp_usb3_lfps_rxterm_irq_cx */
+	{86, 183}, /* mpm_wake,spmi_m */
+	{89, 314}, /* tsens0_tsens_0C_int */
+	{90, 315}, /* tsens1_tsens_0C_int */
+	{93, 188}, /* eud_p0_dmse_int_mx */
+	{94, 184}, /* eud_p0_dpse_int_mx */
+	{-1},
+};
+
 const struct mpm_pin mpm_blair_gic_chip_data[] = {
 	{5, 296}, /* lpass_irq_out_sdc */
 	{12, 422}, /* eud_p0_dpse_int_mx */
@@ -594,10 +614,43 @@ const struct mpm_pin mpm_blair_gic_chip_data[] = {
 	{-1},
 };
 
+const struct mpm_pin mpm_holi_gic_chip_data[] = {
+	{5, 296}, /* lpass_irq_out_sdc */
+	{12, 422}, /* qmp_usb3_lfps_rxterm_irq_cx */
+	{86, 183}, /* mpm_wake,spmi_m */
+	{89, 314}, /* tsens0_tsens_0C_int */
+	{90, 315}, /* tsens1_tsens_0C_int */
+	{93, 260}, /* eud_p0_dpse_int_mx */
+	{94, 260}, /* eud_p0_dmse_int_mx */
+	{-1},
+};
+
+const struct mpm_pin mpm_mdm9607_gic_chip_data[] = {
+	{2, 184}, /* tsens_upper_lower_int */
+	{49, 140}, /* usb1_hs_async_wakeup_irq */
+	{51, 142}, /* usb2_hs_async_wakeup_irq */
+	{53, 72}, /* mdss_irq */
+	{58, 134}, /* usb_hs_irq */
+	{62, 190}, /* ee0_apps_hlos_spmi_periph_irq */
+	{-1},
+};
+
 static const struct of_device_id mpm_gic_chip_data_table[] = {
 	{
 		.compatible = "qcom,mpm-blair",
 		.data = mpm_blair_gic_chip_data,
+	},
+	{
+		.compatible = "qcom,mpm-holi",
+		.data = mpm_holi_gic_chip_data,
+	},
+	{
+		.compatible = "qcom,mpm-pitti",
+		.data = mpm_pitti_gic_chip_data,
+	},
+	{
+		.compatible = "qcom,mpm-gic-mdm9607",
+		.data = mpm_mdm9607_gic_chip_data,
 	},
 	{}
 };

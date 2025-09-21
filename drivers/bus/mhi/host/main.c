@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
  * Copyright (c) 2018-2021, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2025 Qualcomm Innovation Center, Inc. All rights reserved.
  *
  */
 
@@ -553,7 +554,7 @@ irqreturn_t mhi_intvec_threaded_handler(int irq_number, void *priv)
 	}
 	write_unlock_irq(&mhi_cntrl->pm_lock);
 
-	if (pm_state != MHI_PM_SYS_ERR_DETECT || ee == mhi_cntrl->ee)
+	if (pm_state != MHI_PM_SYS_ERR_DETECT)
 		goto exit_intvec;
 
 	switch (ee) {
@@ -1114,14 +1115,13 @@ int mhi_process_data_event_ring(struct mhi_controller *mhi_cntrl,
 
 void mhi_ev_task(unsigned long data)
 {
-	unsigned long flags;
 	struct mhi_event *mhi_event = (struct mhi_event *)data;
 	struct mhi_controller *mhi_cntrl = mhi_event->mhi_cntrl;
 
 	/* process all pending events */
-	spin_lock_irqsave(&mhi_event->lock, flags);
+	spin_lock_bh(&mhi_event->lock);
 	mhi_event->process_event(mhi_cntrl, mhi_event, U32_MAX);
-	spin_unlock_irqrestore(&mhi_event->lock, flags);
+	spin_unlock_bh(&mhi_event->lock);
 }
 
 void mhi_ctrl_ev_task(unsigned long data)
@@ -1770,11 +1770,19 @@ EXPORT_SYMBOL_GPL(mhi_prepare_for_transfer_autoqueue);
 void mhi_unprepare_from_transfer(struct mhi_device *mhi_dev)
 {
 	struct mhi_controller *mhi_cntrl = mhi_dev->mhi_cntrl;
+	struct device *dev = &mhi_dev->dev;
 	struct mhi_chan *mhi_chan;
 	int dir;
 
 	/* Get out of suspended state */
-	mhi_cntrl->runtime_get(mhi_cntrl);
+	if (mhi_cntrl->runtime_get_sync) {
+		MHI_VERB(dev, "Calling runtime_get_sync()\n");
+		mhi_cntrl->runtime_get_sync(mhi_cntrl);
+	} else {
+		MHI_VERB(dev, "Calling runtime_get()\n");
+		mhi_cntrl->runtime_get(mhi_cntrl);
+	}
+
 	for (dir = 0; dir < 2; dir++) {
 		mhi_chan = dir ? mhi_dev->ul_chan : mhi_dev->dl_chan;
 		if (!mhi_chan)
@@ -1782,8 +1790,15 @@ void mhi_unprepare_from_transfer(struct mhi_device *mhi_dev)
 
 		mhi_unprepare_channel(mhi_cntrl, mhi_chan);
 	}
+
 	/* Allow suspend */
-	mhi_cntrl->runtime_put(mhi_cntrl);
+	if (mhi_cntrl->runtime_put_autosuspend) {
+		MHI_VERB(dev, "Calling runtime_put_autosuspend()\n");
+		mhi_cntrl->runtime_put_autosuspend(mhi_cntrl);
+	} else {
+		MHI_VERB(dev, "Calling runtime_put()\n");
+		mhi_cntrl->runtime_put(mhi_cntrl);
+	}
 }
 EXPORT_SYMBOL_GPL(mhi_unprepare_from_transfer);
 

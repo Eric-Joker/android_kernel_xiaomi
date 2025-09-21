@@ -35,6 +35,7 @@
 #define MAX_PMU_EVS	QCOM_PMU_MAX_EVS
 #define INVALID_ID	0xFF
 static void __iomem *pmu_base;
+static uint32_t phys_cpu[NR_CPUS];
 
 #if IS_ENABLED(CONFIG_QTI_SCMI_VENDOR_PROTOCOL)
 #include <linux/qcom_scmi_vendor.h>
@@ -290,7 +291,7 @@ static int __qcom_pmu_read(int cpu, u32 event_id, u64 *pmu_data, bool local)
 	if (!qcom_pmu_inited)
 		return -ENODEV;
 
-	if (!event_id || !pmu_data || cpu >= num_possible_cpus())
+	if (!event_id || !pmu_data || !cpumask_test_cpu(cpu, cpu_possible_mask))
 		return -EINVAL;
 
 	cpu_data = per_cpu(cpu_ev_data, cpu);
@@ -327,7 +328,7 @@ int __qcom_pmu_read_all(int cpu, struct qcom_pmu_data *data, bool local)
 	if (!qcom_pmu_inited)
 		return -ENODEV;
 
-	if (!data || cpu >= num_possible_cpus())
+	if (!data || !cpumask_test_cpu(cpu, cpu_possible_mask))
 		return -EINVAL;
 
 	cpu_data = per_cpu(cpu_ev_data, cpu);
@@ -366,7 +367,7 @@ static struct event_data *get_event(u32 event_id, int cpu)
 	if (!qcom_pmu_inited)
 		return ERR_PTR(-EPROBE_DEFER);
 
-	if (!event_id || cpu >= num_possible_cpus())
+	if (!event_id || !cpumask_test_cpu(cpu, cpu_possible_mask))
 		return ERR_PTR(-EINVAL);
 
 	cpu_data = per_cpu(cpu_ev_data, cpu);
@@ -519,7 +520,7 @@ static int configure_cpucp_map(cpumask_t mask)
 			    is_amu_valid(event->amu_id) || !event->pevent ||
 			    !cpumask_test_cpu(cpu, to_cpumask(&cpucp_map[cid].cpus)))
 				continue;
-			pmu_map[cpu][cid] = event->pevent->hw.idx;
+			pmu_map[phys_cpu[cpu]][cid] = event->pevent->hw.idx;
 		}
 	}
 #if IS_ENABLED(CONFIG_QTI_SCMI_VENDOR_PROTOCOL)
@@ -909,9 +910,17 @@ static void load_pmu_counters(void)
 	pr_info("Enabled all perf counters\n");
 }
 
+static void get_mpidr_cpu(void *cpu)
+{
+	u64 mpidr = read_cpuid_mpidr() & MPIDR_HWID_BITMASK;
+
+	*((uint32_t *)cpu) = MPIDR_AFFINITY_LEVEL(mpidr, 1);
+}
+
 int cpucp_pmu_init(struct scmi_device *sdev)
 {
 	int ret = 0;
+	uint32_t cpu, pcpu;
 
 	if (!sdev || !sdev->handle)
 		return -EINVAL;
@@ -927,6 +936,11 @@ int cpucp_pmu_init(struct scmi_device *sdev)
 		return ret;
 	}
 
+	for_each_possible_cpu(cpu) {
+		smp_call_function_single(cpu, get_mpidr_cpu,
+							 &pcpu, true);
+		phys_cpu[cpu] = pcpu;
+	}
 	/*
 	 * If communication with cpucp doesn't succeed here the device memory
 	 * will be de-allocated. Make ops NULL to avoid further scmi calls.
@@ -950,7 +964,7 @@ static int configure_pmu_event(u32 event_id, int amu_id, int cid, int cpu)
 	struct cpu_data *cpu_data;
 	struct event_data *event;
 
-	if (!event_id || cpu >= num_possible_cpus())
+	if (!event_id || !cpumask_test_cpu(cpu, cpu_possible_mask))
 		return -EINVAL;
 
 	cpu_data = per_cpu(cpu_ev_data, cpu);
@@ -1011,9 +1025,11 @@ static int init_pmu_events(struct device *dev)
 			return -EINVAL;
 
 		for_each_cpu(cpu, to_cpumask(&cpus)) {
-			ret = configure_pmu_event(event_id, amu_id, cid, cpu);
-			if (ret < 0)
-				return ret;
+			if (cpumask_test_cpu(cpu, cpu_possible_mask)) {
+				ret = configure_pmu_event(event_id, amu_id, cid, cpu);
+				if (ret < 0)
+					return ret;
+			}
 		}
 
 		if (is_cid_valid(cid)) {

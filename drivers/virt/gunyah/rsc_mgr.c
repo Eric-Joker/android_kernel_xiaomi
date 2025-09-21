@@ -300,7 +300,7 @@ struct gh_resource *gh_rm_alloc_resource(struct gh_rm *rm, struct gh_rm_hyp_reso
 	ghrsc->capid = le64_to_cpu(hyp_resource->cap_id);
 	ghrsc->irq = IRQ_NOTCONNECTED;
 	ghrsc->rm_label = le32_to_cpu(hyp_resource->resource_label);
-	if (hyp_resource->virq) {
+	if (hyp_resource->virq && hyp_resource->virq != GH_RM_RESOURCE_NO_VIRQ) {
 		struct gh_irq_chip_data irq_data = {
 			.gh_virq = le32_to_cpu(hyp_resource->virq),
 		};
@@ -567,10 +567,6 @@ static int gh_rm_send_request(struct gh_rm *rm, u32 message_id,
 	hdr_template.seq = cpu_to_le16(connection->reply.seq);
 	hdr_template.msg_id = cpu_to_le32(message_id);
 
-	ret = mutex_lock_interruptible(&rm->send_lock);
-	if (ret)
-		return ret;
-
 	do {
 		msg = kmem_cache_zalloc(rm->cache, GFP_KERNEL);
 		if (!msg) {
@@ -609,7 +605,6 @@ static int gh_rm_send_request(struct gh_rm *rm, u32 message_id,
 	} while (buf_size_remaining);
 
 out:
-	mutex_unlock(&rm->send_lock);
 	return ret < 0 ? ret : 0;
 }
 
@@ -663,6 +658,7 @@ int gh_rm_call(void *_rm, u32 message_id, const void *req_buf, size_t req_buf_si
 	connection->reply.seq = lower_16_bits(seq_id);
 
 	/* Send the request to the Resource Manager */
+	mutex_lock(&rm->send_lock);
 	ret = gh_rm_send_request(rm, message_id, req_buf, req_buf_size, connection);
 	if (ret < 0)
 		goto out;
@@ -702,6 +698,7 @@ int gh_rm_call(void *_rm, u32 message_id, const void *req_buf, size_t req_buf_si
 	}
 
 out:
+	mutex_unlock(&rm->send_lock);
 	xa_erase(&rm->call_xarray, connection->reply.seq);
 free:
 	kfree(connection);

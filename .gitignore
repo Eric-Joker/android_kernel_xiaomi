@@ -133,7 +133,6 @@ GTAGS
 # id-utils files
 ID
 
-*.orig
 *~
 \#*#
 
@@ -177,3 +176,6 @@ sphinx_*/
 
 # Xiaomi Add
 drivers/misc/hwid/
+# Android ABI build files
+abi_gki_protected_exports
+all_kmi_symbols

@@ -127,6 +127,7 @@ config IPQ_APSS_6018
 	tristate "IPQ APSS Clock Controller"
 	select IPQ_APSS_PLL
 	depends on QCOM_APCS_IPC || COMPILE_TEST
+	depends on QCOM_SMEM
 	help
 	  Support for APSS clock controller on IPQ platforms. The
 	  APSS clock controller manages the Mux and enable block that feeds the
@@ -1084,6 +1085,15 @@ config SM_DEBUGCC_HOLI
 	  Say Y if you want to support the debug clocks such as
 	  clock measurement functionality.
 
+config CLOCK_CPU_SDXLEMUR
+	bool "CPU SDXLEMUR Clock Controller"
+	depends on COMMON_CLK_QCOM
+	help
+	  Support for the cpu clock controller on SDXLEMUR
+	  based devices.
+	  Say Y if you want to support CPU clock scaling using
+	  CPUfreq drivers for dynamic power management.
+
 config SA_CAMCC_LEMANS
 	tristate "LEMANS Camera Clock Controller"
 	select SA_GCC_LEMANS
@@ -1255,6 +1265,366 @@ config SM_CAMCC_CLIFFS
 	  Cliffs devices.
 	  Say Y if you want to support camera devices and functionality such as
 	  capturing pictures.
+
+config SM_DEBUGCC_CLIFFS
+	tristate "Cliffs Debug Clock Controller"
+	depends on SM_GCC_CLIFFS
+	help
+	  Support for the debug clock controller on Qualcomm Technologies, Inc
+	  Cliffs devices.
+	  Say Y if you want to support the debug clocks such as clock
+	  measurement functionality.
+
+config SM_GCC_PITTI
+	tristate "PITTI Global Clock Controller"
+	depends on COMMON_CLK_QCOM
+	help
+	  Support for the global clock controller on Qualcomm Technologies, Inc
+	  PITTI devices.
+	  Say Y if you want to use peripheral devices such as UART, SPI,
+	  I2C, USB, SD/UFS, Camera, Video etc.
+
+config SXR_GCC_NIOBE
+	tristate "NIOBE Global Clock Controller"
+	depends on COMMON_CLK_QCOM
+	help
+	  Support for the global clock controller on Qualcomm Technologies, Inc
+	  NIOBE devices.
+	  Say Y if you want to use peripheral devices such as UART,
+	  SPI, I2C, USB, SD/UFS, PCIe etc.
+
+config SXR_VIDEOCC_NIOBE
+	tristate "NIOBE Video Clock Controller"
+	depends on SXR_GCC_NIOBE
+	help
+	  Support for the video clock controller on Qualcomm Technologies, Inc
+	  NIOBE devices.
+	  Say Y if you want to support video devices and functionality such as
+	  video encode/decode.
+
+config SXR_GPUCC_NIOBE
+	tristate "NIOBE Graphics Clock Controller"
+	depends on SXR_GCC_NIOBE
+	help
+	  Support for the graphics clock controller on Qualcomm Technologies, Inc
+	  NIOBE devices.
+	  Say Y if you want to support graphics controller devices and
+	  functionality such as 3D graphics.
+
+config SXR_CAMCC_NIOBE
+	tristate "NIOBE Camera Clock Controller"
+	depends on SXR_GCC_NIOBE
+	help
+	  Support for the camera clock controller on Qualcomm Technologies, Inc
+	  NIOBE devices.
+	  Say Y if you want to support camera devices and functionality such as
+	  capturing pictures.
+
+config SXR_DISPCC_NIOBE
+	tristate "NIOBE Display Clock Controller"
+	depends on SXR_GCC_NIOBE
+	help
+	  Support for the display clock controller on Qualcomm Technologies, Inc
+	  NIOBE devices.
+	  Say Y if you want to support display devices and functionality such as
+	  splash screen.
+
+config SM_GPUCC_PITTI
+	tristate "PITTI Graphics Clock Controller"
+	select SM_GCC_PITTI
+	help
+	  Support for the graphics clock controller on Qualcomm Technologies, Inc
+	  PITTI devices.
+	  Say Y if you want to support graphics controller devices and
+	  functionality such as 3D graphics.
+
+config SM_DISPCC_PITTI
+	tristate "PITTI Display Clock Controller"
+	depends on SM_GCC_PITTI
+	help
+	  Support for the display clock controller on Qualcomm Technologies, Inc
+	  PITTI devices.
+	  Say Y if you want to support display devices and functionality such as
+	  splash screen.
+
+config MDM_DEBUGCC_9607
+	tristate "MDM9607 Debug Clock Controller"
+	depends on MDM_GCC_9607
+	help
+	  Support for the debug clock controller on MDM9607
+	  based devices.
+	  Say Y if you want to support the clock measurement
+	  functionality.
+
+config SM_DEBUGCC_PITTI
+	tristate "PITTI Debug Clock Controller"
+	depends on COMMON_CLK_QCOM
+	help
+	  Support for the debug clock controller on Qualcomm Technologies, Inc
+	  PITTI devices.
+	  Say Y if you want to support the debug clocks such as clock
+	  measurement functionality.
+
+config SM_GCC_VOLCANO
+	tristate "Volcano Global Clock Controller"
+	depends on COMMON_CLK_QCOM
+	help
+	  Support for the global clock controller on Qualcomm Technologies, Inc
+	  Volcano devices.
+	  Say Y if you want to use peripheral devices such as UART,
+	  SPI, I2C, USB, SD/UFS, PCIe etc.
+
+config SM_GPUCC_VOLCANO
+	tristate "Volcano Graphics Clock Controller"
+	select SM_GCC_VOLCANO
+	help
+	  Support for the graphics clock controller on Qualcomm Technologies, Inc
+	  Volcano devices.
+	  Say Y if you want to support graphics controller devices and
+	  functionality such as 3D graphics.
+
+config SM_VIDEOCC_VOLCANO
+	tristate "Volcano Video Clock Controller"
+	select SM_GCC_VOLCANO
+	help
+	  Support for the video clock controller on Qualcomm Technologies, Inc
+	  Volcano devices.
+	  Say Y if you want to support video devices and functionality such as
+	  video encode/decode.
+
+config SXR_TCSRCC_NIOBE
+	tristate "NIOBE Top-Level CSR Clock Controller"
+	depends on SXR_GCC_NIOBE
+	help
+	  Support for the TCSR clock controller on Qualcomm Technologies, Inc
+	  NIOBE devices.
+	  Say Y if you want to support miscellaneous top-level clocks
+	  such as for the PHY references.
+
+config SXR_DEBUGCC_NIOBE
+	tristate "NIOBE Debug Clock Controller"
+	depends on COMMON_CLK_QCOM
+	help
+	  Support for the debug clock controller on Qualcomm Technologies, Inc
+	  Niobe devices.
+	  Say Y if you want to support the debug clocks such as clock
+	  measurement functionality.
+
+config SM_CAMCC_VOLCANO
+	tristate "Volcano Camera Clock Controller"
+	select SM_GCC_VOLCANO
+	help
+	  Support for the camera clock controller on Qualcomm Technologies, Inc
+	  Volcano devices.
+	  Say Y if you want to support camera devices and functionality such as
+	  capturing pictures.
+
+config SXR_GCC_ANORAK
+	tristate "ANORAK Global Clock Controller"
+	depends on COMMON_CLK_QCOM
+	help
+	  Support for the global clock controller on Qualcomm Technologies, Inc.
+	  ANORAK devices.
+	  Say Y if you want to use peripheral devices such as UART, SPI, I2C,
+	  USB, UFS, SD/eMMC, PCIE, etc.
+
+config SXR_VIDEOCC_ANORAK
+	tristate "ANORAK Video Clock Controller"
+	select SXR_GCC_ANORAK
+	help
+	  Support for the video clock controller on Qualcomm Technologies, Inc.
+	  ANORAK devices.
+	  Say Y if you want to support video devices and functionality such as
+	  video encode/decode.
+
+config SXR_GPUCC_ANORAK
+	tristate "ANORAK Graphics Clock Controller"
+	select SXR_GCC_ANORAK
+	help
+	  Support for the graphics clock controller on Qualcomm Technologies, Inc.
+	  ANORAK devices.
+	  Say Y if you want to support graphics controller devices and
+	  functionality such as 3D graphics.
+
+config SXR_CAMCC_ANORAK
+	tristate "ANORAK Camera Clock Controller"
+	select SXR_GCC_ANORAK
+	help
+	  Support for the camera clock controller on Qualcomm Technologies, Inc.
+	  ANORAK devices.
+	  Say Y if you want to support camera devices and functionality such as
+	  capturing pictures.
+
+config SXR_DEBUGCC_ANORAK
+	tristate "ANORAK Debug Clock Controller"
+	depends on SXR_GCC_ANORAK
+	help
+	  Support for the debug clock controller on Qualcomm Technologies, Inc.
+	  ANORAK devices.
+	  Say Y if you want to support the debug clocks such as clock measurement
+	  functionality.
+
+config SXR_DISPCC_ANORAK
+        tristate "ANORAK Display Clock Controller"
+        select SXR_GCC_ANORAK
+        help
+          Support for the display clock controller on Qualcomm Technologies, Inc
+          ANORAK devices.
+          Say Y if you want to support display devices and functionality such as
+          splash screen.
+
+config SM_DISPCC_VOLCANO
+	tristate "Volcano Display Clock Controller"
+	select SM_GCC_VOLCANO
+	help
+	  Support for the display clock controller on Qualcomm Technologies, Inc
+	  Volcano devices.
+	  Say Y if you want to support display devices and functionality such as
+	  splash screen.
+
+config SM_DEBUGCC_VOLCANO
+	tristate "Volcano Debug Clock Controller"
+	select SM_GCC_VOLCANO
+	help
+	  Support for the debug clock controller on Qualcomm Technologies, Inc
+	  Volcano devices.
+	  Say Y if you want to support the debug clocks such as clock
+	  measurement functionality.
+
+config SXR_GCC_NEO
+	tristate "NEO Global Clock Controller"
+	depends on COMMON_CLK_QCOM
+	help
+	  Support for the global clock controller on Qualcomm Technologies, Inc.
+	  NEO devices.
+	  Say Y if you want to use peripheral devices such as UART, SPI, I2C,
+	  USB, UFS, SD/eMMC, PCIE, etc.
+
+config SXR_GPUCC_NEO
+	tristate "NEO Graphics Clock Controller"
+	select SXR_GCC_NEO
+	help
+	  Support for the graphics clock controller on Qualcomm Technologies, Inc.
+	  NEO devices.
+	  Say Y if you want to support graphics controller devices and
+	  functionality such as 3D graphics.
+
+config SXR_CAMCC_NEO
+	tristate "NEO Camera Clock Controller"
+	select SXR_GCC_NEO
+	help
+	  Support for the camera clock controller on Qualcomm Technologies, Inc.
+	  NEO devices.
+	  Say Y if you want to support camera devices and functionality such as
+	  capturing pictures.
+
+config SXR_DISPCC_NEO
+	tristate "NEO Display Clock Controller"
+	select SXR_GCC_NEO
+	help
+	  Support for the display clock controller on Qualcomm Technologies, Inc
+	  NEO devices.
+	  Say Y if you want to support display devices and functionality such as
+	  splash screen.
+
+config SXR_VIDEOCC_NEO
+	tristate "NEO Video Clock Controller"
+	select SXR_GCC_NEO
+	help
+	  Support for the video clock controller on Qualcomm Technologies, Inc.
+	  NEO devices.
+	  Say Y if you want to support video devices and functionality such as
+	  video encode/decode.
+
+config SXR_DEBUGCC_NEO
+	tristate "NEO Debug Clock Controller"
+	depends on SXR_GCC_NEO
+	help
+	  Support for the debug clock controller on Qualcomm Technologies, Inc.
+	  NEO devices.
+	  Say Y if you want to support the debug clocks such as clock measurement
+	  functionality.
+
+config SXR_TCSRCC_NEO
+	tristate "Top-Level CSR Clock Controller"
+	depends on COMMON_CLK_QCOM
+	help
+	  Support for the TCSR clock controller on Qualcomm Technologies, Inc
+	  NEO devices.
+	  Say Y if you want to support miscellaneous top-level clocks
+	  such as for the PHY references.
+
+config SXR_GCC_SERAPH
+	tristate "SERAPH Global Clock Controller"
+	depends on COMMON_CLK_QCOM
+	help
+	  Support for the global clock controller on Qualcomm Technologies, Inc
+	  SERAPH devices.
+	  Say Y if you want to use peripheral devices such as UART,
+	  SPI, I2C, USB, SD/UFS, PCIe etc.
+
+config SXR_TCSRCC_SERAPH
+	tristate "Top-Level CSR Clock Controller"
+	depends on COMMON_CLK_QCOM
+	help
+	  Support for the TCSR clock controller on Qualcomm Technologies, Inc
+	  SERAPH devices.
+	  Say Y if you want to support miscellaneous top-level clocks
+	  such as for the PHY references.
+
+config SXR_VIDEOCC_SERAPH
+	tristate "SERAPH Video Clock Controller"
+	depends on SXR_GCC_SERAPH
+	help
+	  Support for the video clock controller on Qualcomm Technologies, Inc
+	  SERAPH devices.
+	  Say Y if you want to support video devices and functionality such as
+	  video encode/decode.
+
+config SXR_EVACC_SERAPH
+	tristate "SERAPH EVA Clock Controller"
+	depends on SXR_GCC_SERAPH
+	help
+	  Support for the eva clock controller on Qualcomm Technologies, Inc
+	  SERAPH devices.
+	  Say Y if you want to support EVA devices to get better visual
+          analysis.
+
+config SXR_LSRCC_SERAPH
+	tristate "SERAPH LSR Clock Controller"
+	depends on SXR_GCC_SERAPH
+	help
+	  Support for the LSR clock controller on Qualcomm Technologies, Inc
+	  SERAPH devices.
+	  Say Y if you want to support LSR devices and functionality of late
+	  state reprojection.
+
+config SXR_CAMCC_SERAPH
+	tristate "SERAPH Camera Clock Controller"
+	depends on SXR_GCC_SERAPH
+	help
+	  Support for the camera clock controller on Qualcomm Technologies, Inc
+	  SERAPH devices.
+	  Say Y if you want to support camera devices and functionality such as
+	  capturing pictures.
+
+config SXR_GPUCC_SERAPH
+	tristate "SERAPH Graphics Clock Controller"
+	depends on SXR_GCC_SERAPH
+	help
+	  Support for the graphics clock controller on Qualcomm Technologies, Inc
+	  SERAPH devices.
+	  Say Y if you want to support graphics controller devices and
+	  functionality such as 3D graphics.
+
+config SXR_DEBUGCC_SERAPH
+	tristate "SERAPH Debug Clock Controller"
+	depends on COMMON_CLK_QCOM
+	help
+	  Support for the debug clock controller on Qualcomm Technologies, Inc
+	  SERAPH devices.
+	  Say Y if you want to support the debug clocks such as clock
+	  measurement functionality.
 
 endif
 

@@ -2,7 +2,7 @@
 /*
  * Copyright (c) 2013, Sony Mobile Communications AB.
  * Copyright (c) 2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2023 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2023-2024 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 #ifndef __PINCTRL_MSM_H__
 #define __PINCTRL_MSM_H__
@@ -39,6 +39,7 @@ struct msm_function {
  * @intr_status_reg:      Offset of the register holding the status bits for this group.
  * @intr_target_reg:      Offset of the register specifying routing of the interrupts
  *                        from this group.
+ * @dir_conn_reg:         Offset of the register hmss setup in tile.
  * @reg_size_4k:          Size of the group register space in 4k granularity.
  * @mux_bit:              Offset in @ctl_reg for the pinmux function selection.
  * @pull_bit:             Offset in @ctl_reg for the bias configuration.
@@ -51,6 +52,7 @@ struct msm_function {
  * @intr_status_bit:      Offset in @intr_status_reg for reading and acking the interrupt
  *                        status.
  * @intr_target_bit:      Offset in @intr_target_reg for configuring the interrupt routing.
+ * @intr_target_width:    Number of bits used for specifying interrupt routing target.
  * @intr_target_kpss_val: Value in @intr_target_bit for specifying that the interrupt from
  *                        this gpio should get routed to the KPSS processor.
  * @intr_raw_status_bit:  Offset in @intr_cfg_reg for the raw status bit.
@@ -59,6 +61,7 @@ struct msm_function {
  * @intr_detection_width: Number of bits used for specifying interrupt type,
  *                        Should be 2 for SoCs that can detect both edges in hardware,
  *                        otherwise 1.
+ * @dir_conn_en_bit:      Offset in @intr_cfg_reg for direct connect enable bit
  * @wake_reg:             Offset of the WAKEUP_INT_EN register from base tile
  * @wake_bit:             Bit number for the corresponding gpio
  */
@@ -75,6 +78,7 @@ struct msm_pingroup {
 	u32 intr_cfg_reg;
 	u32 intr_status_reg;
 	u32 intr_target_reg;
+	u32 dir_conn_reg;
 	unsigned int reg_size_4k:5;
 
 	unsigned int tile:2;
@@ -96,6 +100,7 @@ struct msm_pingroup {
 	unsigned intr_ack_high:1;
 
 	unsigned intr_target_bit:5;
+	unsigned intr_target_width:5;
 	unsigned intr_wakeup_enable_bit:5;
 	unsigned intr_wakeup_present_bit:5;
 	unsigned intr_target_kpss_val:5;
@@ -103,6 +108,7 @@ struct msm_pingroup {
 	unsigned intr_polarity_bit:5;
 	unsigned intr_detection_bit:5;
 	unsigned intr_detection_width:5;
+	unsigned dir_conn_en_bit:8;
 
 	u32 wake_reg;
 	unsigned int wake_bit;
@@ -116,6 +122,16 @@ struct msm_pingroup {
 struct msm_gpio_wakeirq_map {
 	unsigned int gpio;
 	unsigned int wakeirq;
+};
+
+/**
+ * struct msm_dir_conn - TLMM Direct GPIO connect configuration
+ * @gpio:      GPIO pin number
+ * @irq:       The GIC interrupt that the pin is connected to
+ */
+struct msm_dir_conn {
+	int gpio;
+	int irq;
 };
 
 /*
@@ -150,6 +166,7 @@ struct msm_spare_tlmm {
  * @pull_no_keeper: The SoC does not support keeper bias.
  * @wakeirq_map:    The map of wakeup capable GPIOs and the pin at PDC/MPM
  * @nwakeirq_map:   The number of entries in @wakeirq_map
+ * @dir_conn:       An array describing all the pins directly connected to GIC.
  * @wakeirq_dual_edge_errata: If true then GPIOs using the wakeirq_map need
  *                            to be aware that their parent can't handle dual
  *                            edge interrupts.
@@ -184,6 +201,7 @@ struct msm_pinctrl_soc_data {
 	u32 *dir_conn_addr;
 	const struct msm_spare_tlmm *spare_regs;
 	unsigned int nspare_regs;
+	struct msm_dir_conn *dir_conn;
 };
 
 extern const struct dev_pm_ops msm_pinctrl_dev_pm_ops;

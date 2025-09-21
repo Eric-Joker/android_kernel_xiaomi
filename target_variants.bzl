@@ -14,13 +14,18 @@ target_arch_map = {
 
 la_targets = [
     # keep sorted
+    "anorak",
+    "autoghgvm",
     "autogvm",
     "blair",
     "gen3auto",
+    "neo-la",
+    "niobe",
     "pineapple",
     "pitti",
     "sdmsteppeauto",
     "manet",
+    "seraph",
 ]
 
 la_variants = [
@@ -37,8 +42,31 @@ lxc_variants = [
 
 lxc_targets = [
     # keep sorted
+    "autoghgvm",
     "autogvm",
     "gen4auto",
+]
+
+le_32_targets = [
+    # keep sorted
+    "mdm9607",
+]
+
+le_32_variants = [
+    # keep sorted
+    "debug-defconfig",
+    "perf-defconfig",
+]
+
+le_64_targets = [
+    # keep sorted
+    "pineapple-le",
+]
+
+le_64_variants = [
+    # keep sorted
+    "debug-defconfig",
+    "perf-defconfig",
 ]
 
 le_targets = [
@@ -56,11 +84,21 @@ vm_types = [
     "oemvm",
 ]
 
-vm_target_bases = [
-    "pineapple",
+niobe_vm_types = [
+    "tuivm",
 ]
 
-vm_targets = ["{}-{}".format(t, vt) for t in vm_target_bases for vt in vm_types]
+vm_type_opt1 = [
+    "tuivm",
+]
+
+vm_target_bases = {
+    "pineapple": vm_types,
+    "niobe": niobe_vm_types,
+    "seraph": vm_type_opt1,
+}
+
+vm_targets = ["{}-{}".format(t, vt) for t in vm_target_bases.keys() for vt in vm_target_bases[t]]
 
 vm_variants = [
     # keep sorted
@@ -68,11 +106,22 @@ vm_variants = [
     "defconfig",
 ]
 
+lunch_target_bases = {
+    # keep sorted
+    "volcano": "pineapple",
+}
+
 def get_all_la_variants():
     return [(t, v) for t in la_targets for v in la_variants]
 
 def get_all_le_variants():
     return [(t, v) for t in le_targets for v in le_variants]
+
+def get_all_le_32_variants():
+    return [(t, v) for t in le_32_targets for v in le_32_variants]
+
+def get_all_le_64_variants():
+    return [(t, v) for t in le_64_targets for v in le_64_variants]
 
 def get_all_lxc_variants():
     return [(t, v) for t in lxc_targets for v in lxc_variants]
@@ -81,7 +130,10 @@ def get_all_vm_variants():
     return [(t, v) for t in vm_targets for v in vm_variants]
 
 def get_all_variants():
-    return get_all_la_variants() + get_all_le_variants() + get_all_lxc_variants() + get_all_vm_variants()
+    return get_all_la_variants() + get_all_le_variants() + get_all_le_32_variants() + get_all_le_64_variants() + get_all_lxc_variants() + get_all_vm_variants()
 
 def get_arch_of_target(target):
     return target_arch_map[target] 
+
+def get_all_lunch_target_base_target_variants():
+    return [(lt, bt, v) for lt, bt in lunch_target_bases.items() for v in la_variants]

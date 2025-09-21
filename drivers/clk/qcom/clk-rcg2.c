@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2013, 2016-2018, 2020-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2022-2023, Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2022-2025, Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <linux/kernel.h>
@@ -289,17 +289,11 @@ static void disable_unprepare_rcg_srcs(struct clk *curr, struct clk *new)
 static unsigned long
 calc_rate(unsigned long rate, u32 m, u32 n, u32 mode, u32 hid_div)
 {
-	if (hid_div) {
-		rate *= 2;
-		rate /= hid_div + 1;
-	}
+	if (hid_div)
+		rate = mult_frac(rate, 2, hid_div + 1);
 
-	if (mode) {
-		u64 tmp = rate;
-		tmp *= m;
-		do_div(tmp, n);
-		rate = tmp;
-	}
+	if (mode)
+		rate = mult_frac(rate, m, n);
 
 	return rate;
 }
@@ -1216,6 +1210,8 @@ static const struct frac_entry frac_table_pixel[] = {
 	{ 4, 9 },
 	{ 1, 1 },
 	{ 2, 3 },
+	{ 16, 35},
+	{ 4, 15},
 	{ }
 };
 
@@ -1567,11 +1563,44 @@ clk_rcg2_shared_recalc_rate(struct clk_hw *hw, unsigned long parent_rate)
 	return clk_rcg2_recalc_rate(hw, parent_rate);
 }
 
+static int clk_rcg2_shared_init(struct clk_hw *hw)
+{
+	clk_rcg2_init(hw);
+	/*
+	 * This does a few things:
+	 *
+	 *  1. Sets rcg->parked_cfg to reflect the value at probe so that the
+	 *     proper parent is reported from clk_rcg2_shared_get_parent().
+	 *
+	 *  2. Clears the force enable bit of the RCG because we rely on child
+	 *     clks (branches) to turn the RCG on/off with a hardware feedback
+	 *     mechanism and only set the force enable bit in the RCG when we
+	 *     want to make sure the clk stays on for parent switches or
+	 *     parking.
+	 *
+	 *  3. Parks shared RCGs on the safe source at registration because we
+	 *     can't be certain that the parent clk will stay on during boot,
+	 *     especially if the parent is shared. If this RCG is enabled at
+	 *     boot, and the parent is turned off, the RCG will get stuck on. A
+	 *     GDSC can wedge if is turned on and the RCG is stuck on because
+	 *     the GDSC's controller will hang waiting for the clk status to
+	 *     toggle on when it never does.
+	 *
+	 * The safest option here is to "park" the RCG at init so that the clk
+	 * can never get stuck on or off. This ensures the GDSC can't get
+	 * wedged.
+	 */
+	clk_rcg2_shared_disable(hw);
+
+	return 0;
+}
+
 const struct clk_ops clk_rcg2_shared_ops = {
 	.prepare = clk_prepare_regmap,
 	.unprepare = clk_unprepare_regmap,
 	.pre_rate_change = clk_pre_change_regmap,
 	.post_rate_change = clk_post_change_regmap,
+	.init = clk_rcg2_shared_init,
 	.enable = clk_rcg2_shared_enable,
 	.disable = clk_rcg2_shared_disable,
 	.get_parent = clk_rcg2_shared_get_parent,
@@ -1580,7 +1609,6 @@ const struct clk_ops clk_rcg2_shared_ops = {
 	.determine_rate = clk_rcg2_determine_rate,
 	.set_rate = clk_rcg2_shared_set_rate,
 	.set_rate_and_parent = clk_rcg2_shared_set_rate_and_parent,
-	.init = clk_rcg2_init,
 	.debug_init = clk_common_debug_init,
 };
 EXPORT_SYMBOL_GPL(clk_rcg2_shared_ops);
@@ -2006,6 +2034,7 @@ static long clk_rcg2_crmc_list_rate(struct clk_hw *hw, unsigned int n,
 static struct clk_regmap_ops clk_rcg2_crmc_regmap_ops = {
 	.set_crm_rate = clk_rcg2_crmc_hw_set_rate,
 	.list_rate = clk_rcg2_crmc_list_rate,
+	.list_registers = clk_rcg2_list_registers,
 };
 
 static int clk_rcg2_crmc_init(struct clk_hw *hw)
@@ -2022,26 +2051,18 @@ static unsigned long
 clk_rcg2_crmc_recalc_rate(struct clk_hw *hw, unsigned long parent_rate)
 {
 	struct clk_rcg2 *rcg = to_clk_rcg2(hw);
-	struct clk_crm *crm = rcg->clkr.crm;
-	u32 curr_perf_ol;
 
-	if (!clk_hw_is_prepared(hw))
-		return rcg->current_freq;
-
-	if (crm->initialized) {
-		regmap_read(crm->regmap_crmc,
-			    CLK_RCG_CRMC_CURR_PERF_OL(rcg->clkr.crm_vcd), &curr_perf_ol);
-
-		if (curr_perf_ol)
-			curr_perf_ol--;
-
-		if (rcg->freq_tbl && curr_perf_ol < MAX_PERF_LEVEL_PER_VCD)
-			return rcg->freq_tbl[curr_perf_ol].freq;
-	} else {
-		return clk_rcg2_recalc_rate(hw, parent_rate);
-	}
-
-	return -EINVAL;
+	/*
+	 * CRM-controlled clocks have multiple SW and HW voters. We need to
+	 * return the Linux SW vote instead of the current HW rate. The HW rate
+	 * is a result of aggregating across all clients. If we return the
+	 * aggregated rate, then subsequent clk_set_rate() calls can
+	 * short-circuit before calling our set_rate() callback, even if we
+	 * haven't sent a vote for that new rate on behalf of our SW client
+	 * yet. Failing to do so can result in the clock frequency dropping
+	 * below the rate expected by the framework and consumer.
+	 */
+	return rcg->current_freq;
 }
 
 const struct clk_ops clk_rcg2_crmc_ops = {
@@ -2100,7 +2121,7 @@ int clk_rcg2_crmb_prepare(struct clk_hw *hw)
 	struct clk_rcg2 *rcg = to_clk_rcg2(hw);
 	struct clk_crm *crm = rcg->clkr.crm;
 
-	if (!rcg->freq_tbl && !crm->initialized)
+	if (!rcg->freq_tbl || !crm->initialized)
 		return 0;
 
 	return clk_rcg2_vote_bw(hw, rcg->current_freq);
@@ -2187,6 +2208,7 @@ unsigned long clk_rcg2_crmb_hw_set_bw(struct clk_hw *hw,
 static struct clk_regmap_ops clk_rcg2_crmb_regmap_ops = {
 	.set_crm_rate = clk_rcg2_crmb_hw_set_bw,
 	.list_rate = clk_rcg2_list_rate,
+	.list_registers = clk_rcg2_list_registers,
 };
 
 static int clk_rcg2_crmb_init(struct clk_hw *hw)
@@ -2206,7 +2228,7 @@ const struct clk_ops clk_rcg2_crmb_ops = {
 	.get_parent = clk_rcg2_get_parent,
 	.set_rate = clk_rcg2_crmb_set_rate,
 	.determine_rate = clk_rcg2_crmc_determine_rate,
-	.recalc_rate = clk_rcg2_recalc_rate,
+	.recalc_rate = clk_rcg2_crmc_recalc_rate,
 	.init = clk_rcg2_crmb_init,
 	.debug_init = clk_common_debug_init,
 };

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2022-2023 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  */
 
 #define pr_fmt(fmt) "tui_heap: %s"  fmt, __func__
@@ -159,6 +159,47 @@ static void *qcom_tui_heap_add_pool(struct mem_buf_allocation_data *alloc_data)
 	return pool;
 }
 
+/*
+ * Transfer the requested amount of memory from primary VM to the given heap
+ * int the current VM.
+ * Returns a handle which can be released via qcom_tvm_heap_free_kernel_pool.
+ *
+ * The current VM allocates ~1/64 of the requested size for 'struct page'
+ * array and other metadata.
+ */
+void *qcom_tvm_heap_add_kernel_pool(struct dma_heap *heap, size_t size)
+{
+	struct mem_buf_allocation_data args = {};
+	int vmids[1];
+	int perms[1];
+
+	vmids[0] = mem_buf_current_vmid();
+	perms[0] = PERM_READ | PERM_WRITE;
+
+	args.size = size;
+	args.nr_acl_entries = ARRAY_SIZE(vmids);
+	args.vmids = vmids;
+	args.perms = perms;
+	args.trans_type = GH_RM_TRANS_TYPE_LEND;
+	args.sgl_desc = NULL;
+	args.src_mem_type = MEM_BUF_DMAHEAP_MEM_TYPE;
+	args.src_data = "qcom,system";
+	args.dst_mem_type = MEM_BUF_DMAHEAP_MEM_TYPE;
+	args.dst_data = (void *)dma_heap_get_name(heap);
+
+	return qcom_tui_heap_add_pool(&args);
+}
+EXPORT_SYMBOL_GPL(qcom_tvm_heap_add_kernel_pool);
+
+/*
+ * Releases a handle created by qcom_tvm_heap_add_kernel_pool.
+ */
+void qcom_tvm_heap_remove_kernel_pool(void *handle)
+{
+	qcom_tui_heap_remove_pool(handle);
+}
+EXPORT_SYMBOL_GPL(qcom_tvm_heap_remove_kernel_pool);
+
 static int tui_heap_file_release(struct inode *inode, struct file *filp)
 {
 	qcom_tui_heap_remove_pool(filp->private_data);
@@ -255,8 +296,7 @@ static struct dma_buf *tui_heap_allocate(struct dma_heap *dma_heap,
 	}
 
 	/* Initialize the buffer */
-	INIT_LIST_HEAD(&buffer->attachments);
-	mutex_init(&buffer->lock);
+	qcom_sg_buffer_init(buffer);
 	buffer->heap = heap->heap;
 	buffer->len = len;
 	buffer->free = tui_heap_obj_release;
@@ -268,7 +308,7 @@ static struct dma_buf *tui_heap_allocate(struct dma_heap *dma_heap,
 		goto err_sg_alloc_table;
 	sg_set_page(table->sgl, pfn_to_page(PFN_DOWN(paddr)), len, 0);
 
-	buffer->vmperm = mem_buf_vmperm_alloc(table);
+	buffer->vmperm = mem_buf_vmperm_alloc(table, qcom_sg_release, &buffer->kref);
 	if (IS_ERR(buffer->vmperm)) {
 		ret = PTR_ERR(buffer->vmperm);
 		goto err_vmperm_alloc;
@@ -289,7 +329,7 @@ static struct dma_buf *tui_heap_allocate(struct dma_heap *dma_heap,
 	return dmabuf;
 
 err_export:
-	mem_buf_vmperm_release(buffer->vmperm);
+	mem_buf_vmperm_free(buffer->vmperm);
 err_vmperm_alloc:
 	sg_free_table(table);
 err_sg_alloc_table:

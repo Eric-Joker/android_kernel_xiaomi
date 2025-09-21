@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* Copyright (c) 2022-2023, Qualcomm Innovation Center, Inc. All rights reserved. */
+/* Copyright (c) 2022-2025, Qualcomm Innovation Center, Inc. All rights reserved. */
 
 #include <linux/platform_device.h>
 #include <linux/ipc_logging.h>
@@ -172,10 +172,10 @@ static void glink_pkt_kfree_skb(struct glink_pkt_device *gpdev, struct sk_buff *
 		/*
 		 * Data memory is freed by qcom_glink_rx_done(), reset the
 		 * skb data pointers so kfree_skb() does not try to free
-		 * a second time.
+		 * a second time and originally allocated buffer is freed
+		 * correctly.
 		 */
-		skb->head = NULL;
-		skb->data = NULL;
+		skb->data = skb->head;
 	}
 	kfree_skb(skb);
 }
@@ -185,6 +185,7 @@ static void glink_pkt_clear_queues(struct glink_pkt_device *gpdev)
 	struct sk_buff *skb;
 	unsigned long flags;
 
+	mutex_lock(&gpdev->rskb_read_lock);
 	spin_lock_irqsave(&gpdev->queue_lock, flags);
 	if (gpdev->rskb) {
 		glink_pkt_kfree_skb(gpdev, gpdev->rskb);
@@ -199,6 +200,7 @@ static void glink_pkt_clear_queues(struct glink_pkt_device *gpdev)
 		glink_pkt_kfree_skb(gpdev, skb);
 
 	spin_unlock_irqrestore(&gpdev->queue_lock, flags);
+	mutex_unlock(&gpdev->rskb_read_lock);
 }
 
 static int glink_pkt_rpdev_no_copy_cb(struct rpmsg_device *rpdev, void *buf,
@@ -216,11 +218,10 @@ static int glink_pkt_rpdev_no_copy_cb(struct rpmsg_device *rpdev, void *buf,
 		return -ENOMEM;
 	}
 
-	skb->head = buf;
 	skb->data = buf;
 	skb_reset_tail_pointer(skb);
-	skb_set_end_offset(skb, len);
-	skb_put(skb, len);
+	/* For external buffer, skb->tail and skb->len calculation does not match */
+	skb->len += len;
 
 	spin_lock_irqsave(&gpdev->queue_lock, flags);
 	skb_queue_tail(&gpdev->queue, skb);
@@ -241,13 +242,13 @@ static int glink_pkt_rpdev_copy_cb(struct rpmsg_device *rpdev, void *buf,
 	unsigned long flags;
 	struct sk_buff *skb;
 
-	GLINK_PKT_INFO("Data received on:%s len:%d\n", gpdev->ch_name, len);
 
 	if (!gpdev) {
 		GLINK_PKT_ERR("channel is in reset\n");
 		return -ENETRESET;
 	}
 
+	GLINK_PKT_INFO("Data received on:%s len:%d\n", gpdev->ch_name, len);
 	skb = alloc_skb(len, GFP_ATOMIC);
 	if (!skb) {
 		GLINK_PKT_ERR("Failed to allocate skb\n");
@@ -465,8 +466,12 @@ static ssize_t glink_pkt_read(struct file *file,
 		return -EINVAL;
 	}
 
+	if (mutex_lock_interruptible(&gpdev->lock))
+		return -ERESTARTSYS;
+
 	if (!completion_done(&gpdev->ch_open)) {
 		GLINK_PKT_ERR("%s channel in reset\n", gpdev->ch_name);
+		mutex_unlock(&gpdev->lock);
 		return -ENETRESET;
 	}
 
@@ -474,6 +479,8 @@ static ssize_t glink_pkt_read(struct file *file,
 		       gpdev->ch_name, current->comm,
 		       task_pid_nr(current), refcount_read(&gpdev->refcount),
 			   gpdev->rdata_len, count);
+
+	mutex_unlock(&gpdev->lock);
 
 	/* Wait for data in the queue */
 	spin_lock_irq(&gpdev->queue_lock);
@@ -496,6 +503,9 @@ static ssize_t glink_pkt_read(struct file *file,
 	if (!completion_done(&gpdev->ch_open))
 		return -ENETRESET;
 
+	if (mutex_lock_interruptible(&gpdev->lock))
+		return -ERESTARTSYS;
+
 	mutex_lock(&gpdev->rskb_read_lock);
 	spin_lock_irq(&gpdev->queue_lock);
 	if (!gpdev->rskb) {
@@ -503,6 +513,7 @@ static ssize_t glink_pkt_read(struct file *file,
 		if (!gpdev->rskb) {
 			spin_unlock_irq(&gpdev->queue_lock);
 			mutex_unlock(&gpdev->rskb_read_lock);
+			mutex_unlock(&gpdev->lock);
 			return 0;
 		}
 		gpdev->rdata = gpdev->rskb->data;
@@ -536,6 +547,7 @@ static ssize_t glink_pkt_read(struct file *file,
 	GLINK_PKT_INFO("end for %s by %s:%d ret[%d], remaining[%d]\n", gpdev->ch_name,
 		       current->comm, task_pid_nr(current), ret, gpdev->rdata_len);
 
+	mutex_unlock(&gpdev->lock);
 	return ret;
 }
 
@@ -888,6 +900,12 @@ static int glink_pkt_zerocopy_receive(struct glink_pkt_device *gpdev,
 	zap_vma_ptes(vma, address, total_bytes_to_map);
 
 	pages_to_map = total_bytes_to_map / PAGE_SIZE;
+
+	if (leading_page)
+		pages_to_map--;
+	if (trailing_page)
+		pages_to_map--;
+
 	if (leading_page) {
 		rc = vm_insert_page(vma, address, virt_to_page(leading_page));
 		if (rc)

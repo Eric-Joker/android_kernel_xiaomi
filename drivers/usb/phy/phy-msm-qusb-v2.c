@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2014-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2023 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2023-2024, Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #include <linux/module.h>
@@ -149,11 +149,16 @@ struct qusb_phy {
 	u8                      bias_ctrl2;
 
 	bool			override_bias_ctrl2;
+	bool			power_enabled;
+	bool			clocks_enabled;
 };
 
 static void qusb_phy_enable_clocks(struct qusb_phy *qphy, bool on)
 {
 	dev_dbg(qphy->phy.dev, "%s(): on:%d\n", __func__, on);
+
+	if (qphy->clocks_enabled == on)
+		return;
 
 	if (on) {
 		clk_prepare_enable(qphy->ref_clk_src);
@@ -172,6 +177,8 @@ static void qusb_phy_enable_clocks(struct qusb_phy *qphy, bool on)
 
 		clk_disable_unprepare(qphy->ref_clk_src);
 	}
+
+	qphy->clocks_enabled = on;
 }
 
 static int qusb_phy_config_vdd(struct qusb_phy *qphy, int high)
@@ -196,6 +203,11 @@ static int qusb_phy_disable_power(struct qusb_phy *qphy)
 	int ret = 0;
 
 	mutex_lock(&qphy->lock);
+
+	if (!qphy->power_enabled) {
+		mutex_unlock(&qphy->lock);
+		return 0;
+	}
 
 	dev_dbg(qphy->phy.dev, "%s:req to turn off regulators\n",
 			__func__);
@@ -267,6 +279,7 @@ static int qusb_phy_disable_power(struct qusb_phy *qphy)
 
 	pr_debug("%s(): QUSB PHY's regulators are turned OFF.\n", __func__);
 
+	qphy->power_enabled = false;
 	mutex_unlock(&qphy->lock);
 
 	return ret;
@@ -277,6 +290,11 @@ static int qusb_phy_enable_power(struct qusb_phy *qphy)
 	int ret = 0;
 
 	mutex_lock(&qphy->lock);
+
+	if (qphy->power_enabled) {
+		mutex_unlock(&qphy->lock);
+		return 0;
+	}
 
 	dev_dbg(qphy->phy.dev, "%s:req to turn on regulators\n",
 			__func__);
@@ -355,6 +373,7 @@ static int qusb_phy_enable_power(struct qusb_phy *qphy)
 	}
 	pr_debug("%s(): QUSB PHY's regulators are turned ON.\n", __func__);
 
+	qphy->power_enabled = true;
 	mutex_unlock(&qphy->lock);
 
 	return ret;
@@ -578,6 +597,8 @@ static int qusb_phy_init(struct usb_phy *phy)
 		return 0;
 	}
 
+	qusb_phy_enable_power(qphy);
+	qusb_phy_enable_clocks(qphy, true);
 	qusb_phy_reset(qphy);
 
 	if (qphy->qusb_phy_host_init_seq && qphy->phy.flags & PHY_HOST_MODE) {
@@ -711,9 +732,16 @@ static int qusb_phy_set_suspend(struct usb_phy *phy, int suspend)
 	}
 
 suspend:
-	if (suspend) {
-		/* Bus suspend case */
-		if (qphy->cable_connected) {
+	if (suspend) { /* Bus suspend case */
+		/*
+		 * The HUB class drivers calls usb_phy_notify_disconnect() upon a device
+		 * disconnect. Consider a scenario where a USB device is disconnected without
+		 * detaching the OTG cable. phy->cable_connected is marked false due to above
+		 * mentioned call path. Now, while entering low power mode (host bus suspend),
+		 * we come here and turn off regulators thinking no cable is connected. Prevent
+		 * this by not turning off regulators while in host mode.
+		 */
+		if (qphy->cable_connected || (qphy->phy.flags & PHY_HOST_MODE)) {
 			/* Disable all interrupts */
 			writel_relaxed(0x00,
 				qphy->base + qphy->phy_reg[INTR_CTRL]);
@@ -1299,10 +1327,6 @@ static int qusb_phy_probe(struct platform_device *pdev)
 	qphy->phy.notify_disconnect     = qusb_phy_notify_disconnect;
 	qphy->phy.charger_detect	= usb_phy_drive_dp_pulse;
 
-	ret = usb_add_phy_dev(&qphy->phy);
-	if (ret)
-		return ret;
-
 	ret = qusb_phy_regulator_init(qphy);
 	if (ret)
 		usb_remove_phy(&qphy->phy);
@@ -1317,6 +1341,9 @@ static int qusb_phy_probe(struct platform_device *pdev)
 	 */
 	if (qphy->eud_enable_reg && readl_relaxed(qphy->eud_enable_reg))
 		qusb_phy_enable_power(qphy);
+
+	/* Placed at the end to ensure the probe is complete */
+	ret = usb_add_phy_dev(&qphy->phy);
 
 	return ret;
 }

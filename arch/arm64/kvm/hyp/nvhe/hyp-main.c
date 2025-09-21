@@ -39,7 +39,12 @@ static bool (*default_trap_handler)(struct kvm_cpu_context *host_ctxt);
 
 int __pkvm_register_host_smc_handler(bool (*cb)(struct kvm_cpu_context *))
 {
-	return cmpxchg(&default_host_smc_handler, NULL, cb) ? -EBUSY : 0;
+	/*
+	 * Paired with smp_load_acquire(&default_host_smc_handler) in
+	 * handle_host_smc(). Ensure memory stores happening during a pKVM module
+	 * init are observed before executing the callback.
+	 */
+	return cmpxchg_release(&default_host_smc_handler, NULL, cb) ? -EBUSY : 0;
 }
 
 int __pkvm_register_default_trap_handler(bool (*cb)(struct kvm_cpu_context *))
@@ -562,6 +567,10 @@ static void sync_debug_state(struct pkvm_hyp_vcpu *hyp_vcpu)
 		return;
 
 	__vcpu_restore_guest_debug_regs(vcpu);
+	vcpu_write_sys_reg(host_vcpu, vcpu_read_sys_reg(vcpu, MDSCR_EL1),
+						   MDSCR_EL1);
+	*vcpu_cpsr(host_vcpu) = *vcpu_cpsr(vcpu);
+
 	vcpu->arch.debug_ptr = &host_vcpu->arch.vcpu_debug_state;
 }
 
@@ -570,9 +579,6 @@ static void flush_hyp_vcpu(struct pkvm_hyp_vcpu *hyp_vcpu)
 	struct kvm_vcpu *host_vcpu = hyp_vcpu->host_vcpu;
 	hyp_entry_exit_handler_fn ec_handler;
 	u8 esr_ec;
-
-	if (READ_ONCE(hyp_vcpu->power_state) == PSCI_0_2_AFFINITY_LEVEL_ON_PENDING)
-		pkvm_reset_vcpu(hyp_vcpu);
 
 	/*
 	 * If we deal with a non-protected guest and the state is potentially
@@ -818,19 +824,29 @@ static struct kvm_vcpu *__get_host_hyp_vcpus(struct kvm_vcpu *arg,
 		__get_host_hyp_vcpus(__vcpu, hyp_vcpup);			\
 	})
 
+static bool is_vcpu_runnable(struct pkvm_hyp_vcpu *hyp_vcpu)
+{
+	return (!pkvm_hyp_vcpu_is_protected(hyp_vcpu) ||
+		hyp_vcpu->power_state == PSCI_0_2_AFFINITY_LEVEL_ON);
+}
+
 static void handle___kvm_vcpu_run(struct kvm_cpu_context *host_ctxt)
 {
 	struct pkvm_hyp_vcpu *hyp_vcpu;
 	struct kvm_vcpu *host_vcpu;
-	int ret;
+	int ret = ARM_EXCEPTION_IL;
 
 	host_vcpu = get_host_hyp_vcpus(host_ctxt, 1, &hyp_vcpu);
-	if (!host_vcpu) {
-		ret = -EINVAL;
+	if (!host_vcpu)
 		goto out;
-	}
 
 	if (unlikely(hyp_vcpu)) {
+		if (hyp_vcpu->power_state == PSCI_0_2_AFFINITY_LEVEL_ON_PENDING)
+			pkvm_reset_vcpu(hyp_vcpu);
+
+		if (unlikely(!is_vcpu_runnable(hyp_vcpu)))
+			goto out;
+
 		flush_hyp_vcpu(hyp_vcpu);
 
 		ret = __kvm_vcpu_run(&hyp_vcpu->vcpu);
@@ -1236,14 +1252,14 @@ static void handle___pkvm_enable_tracing(struct kvm_cpu_context *host_ctxt)
 
 static void handle___pkvm_rb_swap_reader_page(struct kvm_cpu_context *host_ctxt)
 {
-	DECLARE_REG(int, cpu, host_ctxt, 1);
+	DECLARE_REG(unsigned int, cpu, host_ctxt, 1);
 
 	cpu_reg(host_ctxt, 1) = __pkvm_rb_swap_reader_page(cpu);
 }
 
 static void handle___pkvm_rb_update_footers(struct kvm_cpu_context *host_ctxt)
 {
-	DECLARE_REG(int, cpu, host_ctxt, 1);
+	DECLARE_REG(unsigned int, cpu, host_ctxt, 1);
 
 	cpu_reg(host_ctxt, 1) = __pkvm_rb_update_footers(cpu);
 }
@@ -1329,7 +1345,7 @@ static void handle_host_hcall(struct kvm_cpu_context *host_ctxt)
 	hcall_t hfn;
 
 	if (handle_host_dynamic_hcall(host_ctxt) == HCALL_HANDLED)
-		return;
+		goto end;
 
 	/*
 	 * If pKVM has been initialised then reject any calls to the
@@ -1354,7 +1370,7 @@ static void handle_host_hcall(struct kvm_cpu_context *host_ctxt)
 
 	cpu_reg(host_ctxt, 0) = SMCCC_RET_SUCCESS;
 	hfn(host_ctxt);
-
+end:
 	trace_host_hcall(id, 0);
 
 	return;
@@ -1376,12 +1392,16 @@ static void handle_host_smc(struct kvm_cpu_context *host_ctxt)
 	handled = kvm_host_psci_handler(host_ctxt);
 	if (!handled)
 		handled = kvm_host_ffa_handler(host_ctxt);
-	if (!handled && READ_ONCE(default_host_smc_handler))
+	if (!handled && smp_load_acquire(&default_host_smc_handler))
 		handled = default_host_smc_handler(host_ctxt);
-	if (!handled)
-		__kvm_hyp_host_forward_smc(host_ctxt);
 
 	trace_host_smc(func_id, !handled);
+
+	if (!handled) {
+		trace_hyp_exit();
+		__kvm_hyp_host_forward_smc(host_ctxt);
+		trace_hyp_enter();
+	}
 
 	/* SMC was trapped, move ELR past the current PC. */
 	kvm_skip_host_instr();

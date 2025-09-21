@@ -2978,6 +2978,7 @@ static int haptics_erase(struct input_dev *dev, int effect_id)
 	int rc;
 
 	dev_dbg(chip->dev, "erase effect, really stop play\n");
+	cancel_work_sync(&chip->set_gain_work);
 	mutex_lock(&play->lock);
 	cancel_delayed_work_sync(&chip->stop_work);
 	if ((play->pattern_src == FIFO) &&
@@ -4995,6 +4996,7 @@ static int haptics_start_auto_brake_calibration(struct haptics_chip *chip)
 	}
 
 	/* Set PTRN1_CFGx for each cycle in the 6-cycle drive calibration */
+	memset(val, 0, sizeof(val));
 	rc = nvmem_device_write(chip->hap_cfg_nvmem, HAP_AUTO_BRAKE_CAL_PTRN1_CFG0_OFFSET,
 			AUTO_BRAKE_CAL_DRIVE_CYCLES, val);
 	if (rc < 0) {
@@ -5137,6 +5139,9 @@ static int haptics_start_lra_calibrate(struct haptics_chip *chip)
 		dev_err(chip->dev, "Detect LRA impedance failed, rc=%d\n", rc);
 		goto unlock;
 	}
+
+	/* Sleep 50ms to stabilize the LRA from impedance detection */
+	msleep(50);
 
 	rc = haptics_start_auto_brake_calibration(chip);
 	if (rc < 0) {

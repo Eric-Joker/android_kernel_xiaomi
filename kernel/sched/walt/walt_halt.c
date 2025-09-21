@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2021-2023 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2021-2024 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 #include <linux/cpu.h>
 #include <linux/cpumask.h>
@@ -193,7 +193,13 @@ static int drain_rq_cpu_stop(void *data)
 	struct walt_rq *wrq = &per_cpu(walt_rq, cpu_of(rq));
 
 	rq_lock_irqsave(rq, &rf);
+	/* rq lock is pinned */
+
+	/* migrate tasks assumes that the lock is pinned, and will unlock/repin */
 	migrate_tasks(rq, &rf);
+
+	/* __balance_callbacks can unlock and relock the rq lock. unpin */
+	rq_unpin_lock(rq, &rf);
 
 	/*
 	 * service any callbacks that were accumulated, prior to unlocking. such that
@@ -205,7 +211,8 @@ static int drain_rq_cpu_stop(void *data)
 	if (wrq->enqueue_counter)
 		WALT_BUG(WALT_BUG_WALT, NULL, "cpu: %d task was re-enqueued", cpu_of(rq));
 
-	rq_unlock_irqrestore(rq, &rf);
+	/* lock is no longer pinned, raw unlock using same flags as locking */
+	raw_spin_rq_unlock_irqrestore(rq, rf.flags);
 
 	return 0;
 }
@@ -281,7 +288,7 @@ void restrict_cpus_and_freq(struct cpumask *cpus)
 		}
 	}
 
-	update_fmax_cap_capacities(PARTIAL_HALT_CAP);
+	update_fmax_cap_capacities();
 }
 
 struct task_struct *walt_drain_thread;
@@ -526,14 +533,37 @@ static void android_rvh_get_nohz_timer_target(void *unused, int *cpu, bool *done
 {
 	int i, default_cpu = -1;
 	struct sched_domain *sd;
-	cpumask_t unhalted;
+	cpumask_t active_unhalted;
 
 	*done = true;
+	cpumask_andnot(&active_unhalted, cpu_active_mask, cpu_halt_mask);
 
 	if (housekeeping_cpu(*cpu, HK_TYPE_TIMER) && !cpu_halted(*cpu)) {
 		if (!available_idle_cpu(*cpu))
 			return;
 		default_cpu = *cpu;
+	}
+
+	/*
+	 * find first cpu halted by core control and try to avoid
+	 * affecting externally halted cpus.
+	 */
+	if (!cpumask_weight(&active_unhalted)) {
+		cpumask_t tmp_pause, tmp_part_pause, tmp_halt, *tmp;
+
+		cpumask_and(&tmp_part_pause, cpu_active_mask, &cpus_part_paused_by_us);
+		cpumask_and(&tmp_pause, cpu_active_mask, &cpus_paused_by_us);
+		cpumask_and(&tmp_halt, cpu_active_mask, cpu_halt_mask);
+		tmp = cpumask_weight(&tmp_part_pause) ? &tmp_part_pause :
+			cpumask_weight(&tmp_pause) ? &tmp_pause : &tmp_halt;
+
+		for_each_cpu(i, tmp) {
+			if ((*cpu == i) && cpumask_weight(tmp) > 1)
+				continue;
+
+			*cpu = i;
+			return;
+		}
 	}
 
 	rcu_read_lock();
@@ -551,8 +581,7 @@ static void android_rvh_get_nohz_timer_target(void *unused, int *cpu, bool *done
 	}
 
 	if (default_cpu == -1) {
-		cpumask_complement(&unhalted, cpu_halt_mask);
-		for_each_cpu_and(i, &unhalted,
+		for_each_cpu_and(i, &active_unhalted,
 				 housekeeping_cpumask(HK_TYPE_TIMER)) {
 			if (*cpu == i)
 				continue;
@@ -563,8 +592,8 @@ static void android_rvh_get_nohz_timer_target(void *unused, int *cpu, bool *done
 			}
 		}
 
-		/* no active, non-halted, not-idle, choose any */
-		default_cpu = cpumask_any(&unhalted);
+		/* choose any active unhalted cpu */
+		default_cpu = cpumask_any(&active_unhalted);
 
 		if (unlikely(default_cpu >= nr_cpu_ids))
 			goto unlock;

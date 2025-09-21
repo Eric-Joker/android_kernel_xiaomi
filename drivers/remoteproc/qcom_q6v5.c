@@ -5,6 +5,7 @@
  * Copyright (C) 2016-2018 Linaro Ltd.
  * Copyright (C) 2014 Sony Mobile Communications AB
  * Copyright (c) 2012-2013, 2020-2021, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2023-2025 Qualcomm Innovation Center, Inc. All rights reserved.
  */
 #include <linux/kernel.h>
 #include <linux/platform_device.h>
@@ -14,6 +15,7 @@
 #include <linux/soc/qcom/smem_state.h>
 #include <linux/remoteproc.h>
 #include <linux/delay.h>
+#include <linux/interconnect.h>
 #include "qcom_common.h"
 /* XIAOMI-CHANGE-CRASH (3025407) start: crash history */
 #include <linux/seq_file.h>
@@ -213,16 +215,13 @@ static void qcom_q6v5_crash_handler_work(struct work_struct *work)
 	int votes;
 
 	mutex_lock(&rproc->lock);
-
-	rproc->state = RPROC_CRASHED;
-
-	votes = atomic_xchg(&rproc->power, 0);
-	/* if votes are zero, rproc has already been shutdown */
-	if (votes == 0) {
+	votes = atomic_read(&rproc->power);
+	if (votes == 0 || q6v5->crash_seq != q6v5->seq) {
 		mutex_unlock(&rproc->lock);
 		return;
 	}
 
+	rproc->state = RPROC_CRASHED;
 	list_for_each_entry_reverse(subdev, &rproc->subdevs, node) {
 		if (subdev->stop)
 			subdev->stop(subdev, true);
@@ -245,6 +244,9 @@ static irqreturn_t q6v5_wdog_interrupt(int irq, void *data)
 	char *msg;
 	int temp_num;    // XIAOMI-CHANGE-CRASH (3025407): crash history
 
+	if (q6v5->early_boot && !completion_done(&q6v5->subsys_booted))
+		complete(&q6v5->subsys_booted);
+
 	/* Sometimes the stop triggers a watchdog rather than a stop-ack */
 	if (!q6v5->running) {
 		dev_info(q6v5->dev, "received wdog irq while q6 is offline\n");
@@ -252,6 +254,7 @@ static irqreturn_t q6v5_wdog_interrupt(int irq, void *data)
 		return IRQ_HANDLED;
 	}
 
+	q6v5->crash_seq = q6v5->seq;
 	msg = qcom_smem_get(QCOM_SMEM_HOST_ANY, q6v5->crash_reason, &len);
 	if (!IS_ERR(msg) && len > 0 && msg[0]) {
 		dev_err(q6v5->dev, "watchdog received: %s\n", msg);
@@ -291,14 +294,13 @@ static irqreturn_t q6v5_wdog_interrupt(int irq, void *data)
 		"disabled and lead to device crash" :
 		"enabled and kick reovery process");
 
-	if (q6v5->rproc->recovery_disabled) {
-		schedule_work(&q6v5->crash_handler);
-	} else {
-		if (q6v5->ssr_subdev)
-			qcom_notify_early_ssr_clients(q6v5->ssr_subdev);
+	if (q6v5->ssr_subdev)
+		qcom_notify_early_ssr_clients(q6v5->ssr_subdev);
 
+	if (q6v5->rproc->recovery_disabled)
+		schedule_work(&q6v5->crash_handler);
+	else
 		rproc_report_crash(q6v5->rproc, RPROC_WATCHDOG);
-	}
 
 	return IRQ_HANDLED;
 }
@@ -310,11 +312,15 @@ static irqreturn_t q6v5_fatal_interrupt(int irq, void *data)
 	char *msg;
 	int temp_num;    // XIAOMI-CHANGE-CRASH (3025407): crash history
 
+	if (q6v5->early_boot && !completion_done(&q6v5->subsys_booted))
+		complete(&q6v5->subsys_booted);
+
 	if (!q6v5->running) {
 		dev_info(q6v5->dev, "received fatal irq while q6 is offline\n");
 		return IRQ_HANDLED;
 	}
 
+	q6v5->crash_seq = q6v5->seq;
 	msg = qcom_smem_get(QCOM_SMEM_HOST_ANY, q6v5->crash_reason, &len);
 	if (!IS_ERR(msg) && len > 0 && msg[0]) {
 		dev_err(q6v5->dev, "fatal error received: %s\n", msg);
@@ -351,14 +357,14 @@ static irqreturn_t q6v5_fatal_interrupt(int irq, void *data)
 	dev_err(q6v5->dev, "rproc recovery state: %s\n",
 		q6v5->rproc->recovery_disabled ? "disabled and lead to device crash" :
 		"enabled and kick reovery process");
-	if (q6v5->rproc->recovery_disabled) {
-		schedule_work(&q6v5->crash_handler);
-	} else {
-		if (q6v5->ssr_subdev)
-			qcom_notify_early_ssr_clients(q6v5->ssr_subdev);
 
+	if (q6v5->ssr_subdev)
+		qcom_notify_early_ssr_clients(q6v5->ssr_subdev);
+
+	if (q6v5->rproc->recovery_disabled)
+		schedule_work(&q6v5->crash_handler);
+	else
 		rproc_report_crash(q6v5->rproc, RPROC_FATAL_ERROR);
-	}
 
 	return IRQ_HANDLED;
 }
@@ -368,6 +374,9 @@ static irqreturn_t q6v5_ready_interrupt(int irq, void *data)
 	struct qcom_q6v5 *q6v5 = data;
 
 	complete(&q6v5->start_done);
+
+	if (q6v5->early_boot && !completion_done(&q6v5->subsys_booted))
+		complete(&q6v5->subsys_booted);
 
 	return IRQ_HANDLED;
 }
@@ -399,6 +408,11 @@ static irqreturn_t q6v5_handover_interrupt(int irq, void *data)
 
 	if (q6v5->handover)
 		q6v5->handover(q6v5);
+
+	if (q6v5->early_boot && !completion_done(&q6v5->subsys_booted))
+		complete(&q6v5->subsys_booted);
+
+	icc_set_bw(q6v5->path, 0, 0);
 
 	q6v5->handover_issued = true;
 
@@ -482,6 +496,96 @@ unsigned long qcom_q6v5_panic(struct qcom_q6v5 *q6v5)
 }
 EXPORT_SYMBOL_GPL(qcom_q6v5_panic);
 
+static irqreturn_t q6v5_pong_interrupt(int irq, void *data)
+{
+	struct qcom_q6v5 *q6v5 = NULL;
+
+	q6v5 = data;
+
+	if (!q6v5) {
+		pr_err("Could not get driver data\n");
+		return -ENODEV;
+	}
+
+	complete(&q6v5->ping_done);
+
+	return IRQ_HANDLED;
+}
+
+int ping_subsystem(struct qcom_q6v5 *q6v5)
+{
+	int ret = -ETIMEDOUT;
+	int ping_failed = 0;
+
+	reinit_completion(&q6v5->ping_done);
+
+	/* Set master kernel Ping bit */
+	ret = qcom_smem_state_update_bits(q6v5->ping_state,
+			    0xffffffff,
+			    BIT(q6v5->ping_bit));
+	if (ret) {
+		dev_err(q6v5->dev, "Failed to update ping bits\n");
+		return ret;
+	}
+
+	ret = wait_for_completion_timeout(&q6v5->ping_done, msecs_to_jiffies(PING_TIMEOUT));
+	if (!ret) {
+		ping_failed = -ETIMEDOUT;
+		dev_err(q6v5->dev, "Failed to get back pong\n");
+	}
+
+
+	/* Clear ping bit master kernel */
+	ret = qcom_smem_state_update_bits(q6v5->ping_state,
+			    BIT(q6v5->ping_bit),
+			    0);
+	if (ret) {
+		pr_err("Failed to clear master kernel bits\n");
+		return ret;
+	}
+	if (ping_failed)
+		return ping_failed;
+
+	return ret;
+
+}
+EXPORT_SYMBOL_GPL(ping_subsystem);
+
+int ping_subsystem_init(struct qcom_q6v5 *q6v5, struct platform_device *pdev)
+{
+	int ret = -ENODEV;
+
+	if (!q6v5) {
+		pr_err("could not get q6v5 data\n");
+		return -ENODEV;
+	}
+
+	q6v5->ping_state = devm_qcom_smem_state_get(&pdev->dev,
+							"ping", &q6v5->ping_bit);
+	if (IS_ERR(q6v5->ping_state)) {
+		pr_err("failed to acquire smem state %ld\n", PTR_ERR(q6v5->ping_state));
+		ret = -ENODEV;
+		return ret;
+	}
+
+	q6v5->pong_irq = platform_get_irq_byname(pdev, "pong");
+	if (q6v5->pong_irq < 0) {
+		pr_err("failed to acquire pong irq\n");
+		ret = -ENODEV;
+		return ret;
+	}
+
+	ret = devm_request_threaded_irq(&pdev->dev, q6v5->pong_irq, NULL,
+			q6v5_pong_interrupt, IRQF_TRIGGER_RISING | IRQF_ONESHOT,
+			"q6v5 pong", q6v5);
+	if (ret)
+		pr_err("failed to acquire pong IRQ\n");
+
+	init_completion(&q6v5->ping_done);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(ping_subsystem_init);
+
 /**
  * qcom_q6v5_init() - initializer of the q6v5 common struct
  * @q6v5:	handle to be initialized
@@ -493,7 +597,7 @@ EXPORT_SYMBOL_GPL(qcom_q6v5_panic);
  * Return: 0 on success, negative errno on failure
  */
 int qcom_q6v5_init(struct qcom_q6v5 *q6v5, struct platform_device *pdev,
-		   struct rproc *rproc, int crash_reason,
+		   struct rproc *rproc,  int crash_reason, bool early_boot,
 		   void (*handover)(struct qcom_q6v5 *q6v5))
 {
 	int ret;
@@ -528,6 +632,7 @@ int qcom_q6v5_init(struct qcom_q6v5 *q6v5, struct platform_device *pdev,
 	q6v5->dev = &pdev->dev;
 	q6v5->crash_reason = crash_reason;
 	q6v5->handover = handover;
+	q6v5->early_boot = early_boot;
 	q6v5->ssr_subdev = NULL;
 
 	init_completion(&q6v5->start_done);

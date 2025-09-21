@@ -14,7 +14,7 @@
  *	- Context fault reporting
  *	- Extended Stream ID (16 bit)
  *
- * Copyright (c) 2021-2023, Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  */
 
 #define pr_fmt(fmt) "arm-smmu: " fmt
@@ -42,6 +42,7 @@
 #include <soc/qcom/secure_buffer.h>
 #include <linux/irq.h>
 #include <linux/wait.h>
+#include <trace/hooks/iommu.h>
 
 #include <linux/fsl/mc.h>
 
@@ -52,6 +53,7 @@
 #include "../../qcom-dma-iommu-generic.h"
 #include "../../qcom-io-pgtable-alloc.h"
 #include <linux/qcom-iommu-util.h>
+#include <linux/suspend.h>
 
 #define CREATE_TRACE_POINTS
 #include "arm-smmu-trace.h"
@@ -1470,6 +1472,11 @@ static int arm_smmu_init_domain_context(struct iommu_domain *domain,
 			goto out_clear_smmu;
 	}
 
+	if (IS_ENABLED(CONFIG_QCOM_SMMU_IRGN0_ERRATA)) {
+		if (!of_device_is_compatible(smmu->dev->of_node, "qcom,adreno-smmu"))
+			pgtbl_cfg->quirks |= IO_PGTABLE_QUIRK_QCOM_TCR_IRGN_NC;
+	}
+
 	if (smmu_domain->pgtbl_quirks)
 		pgtbl_cfg->quirks |= smmu_domain->pgtbl_quirks;
 
@@ -2662,6 +2669,22 @@ static int arm_smmu_def_domain_type(struct device *dev)
 	return 0;
 }
 
+static inline void __arm_smmu_sid_switch_touch_cbar(struct arm_smmu_device *smmu,
+						    struct arm_smmu_master_cfg *cfg,
+						    struct iommu_fwspec *fwspec)
+{
+	int i, idx;
+	u8 cbndx;
+
+	/* Use for_each_cfg_sme() to look up the context bank index */
+	for_each_cfg_sme(cfg, fwspec, i, idx) {
+		cbndx = smmu->s2crs[idx].cbndx;
+		/* Touch the CBAR by calling arm_smmu_write_context_bank() */
+		arm_smmu_write_context_bank(smmu, cbndx);
+		break;
+	}
+}
+
 static int __arm_smmu_sid_switch(struct device *dev, void *data)
 {
 	struct iommu_fwspec *fwspec = dev_iommu_fwspec_get(dev);
@@ -2677,6 +2700,16 @@ static int __arm_smmu_sid_switch(struct device *dev, void *data)
 	arm_smmu_rpm_get(smmu);
 
 	mutex_lock(&smmu->stream_map_mutex);
+
+	/*
+	 * When activating an SMR on a VM, we need to ensure that the SMR's
+	 * corresponding CBAR has the right VMID value, which is provided by the
+	 * hypervisor. Touch the CBAR register before doing the SID-switch to do
+	 * this.
+	 */
+	if (dir == SID_ACQUIRE)
+		__arm_smmu_sid_switch_touch_cbar(smmu, cfg, fwspec);
+
 	for_each_cfg_sme(cfg, fwspec, i, idx) {
 		smmu->smrs[idx].valid = dir == SID_ACQUIRE;
 		arm_smmu_write_sme(smmu, idx);
@@ -2890,35 +2923,25 @@ static struct qcom_iommu_ops arm_smmu_ops = {
 
 static void arm_smmu_device_reset(struct arm_smmu_device *smmu)
 {
+
+#if !defined CONFIG_QTI_QUIN_GVM
 	int i;
+#endif
 	u32 reg;
 
 	/* clear global FSR */
 	reg = arm_smmu_gr0_read(smmu, ARM_SMMU_GR0_sGFSR);
 	arm_smmu_gr0_write(smmu, ARM_SMMU_GR0_sGFSR, reg);
 
-#if defined CONFIG_QTI_QUIN_GVM
-	/*
-	 * Reset stream mapping groups for unused sme's: Initial values mark all SMRn as
-	 * invalid and all S2CRn as bypass unless overridden.
-	 */
-	for (i = 0; i < smmu->num_mapping_groups; ++i)
-		if (!smmu->s2crs[i].pinned)
-			arm_smmu_write_sme(smmu, i);
-
-	/* Make sure only unpinned context banks are disabled and clear CB_FSR  */
-	for (i = 0; i < smmu->num_context_banks; ++i)
-		if (!smmu->s2crs[i].pinned) {
-			arm_smmu_write_context_bank(smmu, i);
-			arm_smmu_cb_write(smmu, i, ARM_SMMU_CB_FSR, ARM_SMMU_FSR_FAULT);
-		}
-#else
+#if !defined CONFIG_QTI_QUIN_GVM
 	/*
 	 * Reset stream mapping groups: Initial values mark all SMRn as
 	 * invalid and all S2CRn as bypass unless overridden.
 	 */
+	mutex_lock(&smmu->stream_map_mutex);
 	for (i = 0; i < smmu->num_mapping_groups; ++i)
 		arm_smmu_write_sme(smmu, i);
+	mutex_unlock(&smmu->stream_map_mutex);
 
 	/* Make sure all context banks are disabled and clear CB_FSR  */
 	for (i = 0; i < smmu->num_context_banks; ++i) {
@@ -3055,8 +3078,9 @@ static int arm_smmu_handoff_cbs(struct arm_smmu_device *smmu)
 			if (!handoff_smrs[index].valid)
 				continue;
 
-			if ((handoff_smrs[index].mask & smrs.mask) == handoff_smrs[index].mask &&
-			    !((handoff_smrs[index].id ^ smrs.id) & ~smrs.mask)) {
+			/* smrs is subset of handoff_smrs */
+			if ((handoff_smrs[index].mask & smrs.mask) == smrs.mask &&
+			    !((handoff_smrs[index].id ^ smrs.id) & ~handoff_smrs[index].mask)) {
 
 				dev_dbg(smmu->dev,
 					"handoff-smrs match idx %d, id, 0x%x, mask 0x%x\n",
@@ -3100,6 +3124,8 @@ static int arm_smmu_device_cfg_probe(struct arm_smmu_device *smmu)
 	u32 id;
 	bool cttw_reg, cttw_fw = smmu->features & ARM_SMMU_FEAT_COHERENT_WALK;
 	int i, ret;
+	unsigned int num_mapping_groups_override = 0;
+	unsigned int num_context_banks_override = 0;
 
 	dev_notice(smmu->dev, "probing hardware configuration...\n");
 	dev_notice(smmu->dev, "SMMUv%d with:\n",
@@ -3189,6 +3215,15 @@ static int arm_smmu_device_cfg_probe(struct arm_smmu_device *smmu)
 	for (i = 0; i < size; i++)
 		smmu->s2crs[i] = s2cr_init_val;
 
+	ret = of_property_read_u32(smmu->dev->of_node, "qcom,num-smr-override",
+		&num_mapping_groups_override);
+	if (!ret && size > num_mapping_groups_override) {
+		dev_dbg(smmu->dev, "%d mapping groups overridden to %d\n",
+			size, num_mapping_groups_override);
+
+		size = min(size, num_mapping_groups_override);
+	}
+
 	smmu->num_mapping_groups = size;
 	mutex_init(&smmu->stream_map_mutex);
 	spin_lock_init(&smmu->global_sync_lock);
@@ -3218,6 +3253,20 @@ static int arm_smmu_device_cfg_probe(struct arm_smmu_device *smmu)
 
 	smmu->num_s2_context_banks = FIELD_GET(ARM_SMMU_ID1_NUMS2CB, id);
 	smmu->num_context_banks = FIELD_GET(ARM_SMMU_ID1_NUMCB, id);
+
+	ret = of_property_read_u32(smmu->dev->of_node,
+		"qcom,num-context-banks-override",
+		&num_context_banks_override);
+
+	if (!ret && smmu->num_context_banks > num_context_banks_override) {
+		dev_dbg(smmu->dev, "%d context banks overridden to %d\n",
+			smmu->num_context_banks,
+			num_context_banks_override);
+
+		smmu->num_context_banks = min(smmu->num_context_banks,
+					num_context_banks_override);
+	}
+
 	if (smmu->num_s2_context_banks > smmu->num_context_banks) {
 		dev_err(smmu->dev, "impossible number of S2 context banks!\n");
 		return -ENODEV;
@@ -3485,6 +3534,17 @@ static void arm_smmu_rmr_install_bypass_smr(struct arm_smmu_device *smmu)
 	iort_put_rmr_sids(dev_fwnode(smmu->dev), &rmr_list);
 }
 
+/* skip pcie iommu bus probe if smmuv2 and smmuv3 both enabled. */
+#if IS_ENABLED(CONFIG_ARM_PARAVIRT_SMMU_V3)
+static void arm_smmu_iommu_pcie_device_probe(void *data, struct iommu_device *iommu,
+					struct bus_type *bus, bool *skip)
+{
+	if (iommu != (struct iommu_device *)data)
+		return;
+	*skip = !strcmp(bus->name, "pci");
+}
+#endif
+
 static int arm_smmu_device_probe(struct platform_device *pdev)
 {
 	struct resource *res;
@@ -3619,6 +3679,11 @@ static int arm_smmu_device_probe(struct platform_device *pdev)
 		goto out_power_off;
 	}
 
+	#if IS_ENABLED(CONFIG_ARM_PARAVIRT_SMMU_V3)
+	if (of_find_compatible_node(NULL, NULL, "arm,virt-smmu-v3"))
+		register_trace_android_vh_bus_iommu_probe(arm_smmu_iommu_pcie_device_probe,
+							(void *)&smmu->iommu);
+	#endif
 	err = iommu_device_register(&smmu->iommu, &arm_smmu_ops.iommu_ops, dev);
 	if (err) {
 		dev_err(dev, "Failed to register iommu\n");
@@ -3718,7 +3783,7 @@ static int __maybe_unused arm_smmu_runtime_suspend(struct device *dev)
 	return 0;
 }
 
-static int __maybe_unused arm_smmu_pm_resume(struct device *dev)
+static int __maybe_unused arm_smmu_pm_resume_common(struct device *dev)
 {
 	int ret;
 	struct arm_smmu_device *smmu = dev_get_drvdata(dev);
@@ -3745,26 +3810,10 @@ static int __maybe_unused arm_smmu_pm_resume(struct device *dev)
 	return ret;
 }
 
-static int __maybe_unused arm_smmu_pm_suspend(struct device *dev)
-{
-	int ret = 0;
-	struct arm_smmu_device *smmu = dev_get_drvdata(dev);
-
-	if (pm_runtime_suspended(dev))
-		goto clk_unprepare;
-
-	ret = arm_smmu_runtime_suspend(dev);
-	if (ret)
-		return ret;
-
-clk_unprepare:
-	clk_bulk_unprepare(smmu->num_clks, smmu->clks);
-	return ret;
-}
-
-
 static int arm_smmu_pm_prepare(struct device *dev)
 {
+	int ret = 0;
+
 	if (!of_device_is_compatible(dev->of_node, "qcom,adreno-smmu"))
 		return 0;
 
@@ -3773,14 +3822,36 @@ static int arm_smmu_pm_prepare(struct device *dev)
 	 * cause a deadlock where cx vote is never put down causing timeout. So,
 	 * abort system suspend here if dev->power.usage_count is 1 as this indicates
 	 * rpm_suspend is in progress and prepare is the one incrementing this counter.
-	 * Now rpm_suspend can continue and put down cx vote. System suspend will resume
-	 * later and complete.
+	 * Now pm runtime put sync suspend will complete the rpm suspend and system
+	 * suspend will resume later and complete.
+	 * in case if runtime still not suspended after sync suspend also then will
+	 * retry with EGAIN by incrementing the usage count to avoid the under flow.
 	 */
 	if (pm_runtime_suspended(dev))
 		return 0;
 
-	return (atomic_read(&dev->power.usage_count) == 1) ? -EINPROGRESS : 0;
+	if (atomic_read(&dev->power.usage_count) == 1) {
+		ret = pm_runtime_put_sync_suspend(dev);
+		/*
+		 * sync suspend would decrement the usage count before rpm suspend
+		 * and this causes usage count under flow in the next sequence of
+		 * runtime suspend operations. due to this underflow, system suspend
+		 * will fail and keeps smmu alive and further it is observed by adreno
+		 * while resuming. which is  warning for every 5 seconds by dumping
+		 * these votes.
+		 * to avoid this problem incremented the usage count back to make sure
+		 * the usage count is align before prepare and after suspend when
+		 * sync supend is invoked.
+		 */
+		pm_runtime_get_noresume(dev);
+		if (ret < 0) {
+			dev_err(dev, "sync supend failed to suspend the rpm\n");
+			return -EAGAIN;
+		}
+	}
+	return 0;
 }
+
 static int __maybe_unused arm_smmu_pm_restore_early(struct device *dev)
 {
 	struct arm_smmu_device *smmu = dev_get_drvdata(dev);
@@ -3813,10 +3884,9 @@ static int __maybe_unused arm_smmu_pm_restore_early(struct device *dev)
 		smmu_domain->pgtbl_ops = pgtbl_ops;
 		arm_smmu_init_context_bank(smmu_domain, pgtbl_cfg);
 	}
-	arm_smmu_pm_resume(dev);
-	ret = arm_smmu_runtime_suspend(dev);
+	ret = arm_smmu_pm_resume_common(dev);
 	if (ret) {
-		dev_err(dev, "Failed to suspend\n");
+		dev_err(dev, "Failed to resume\n");
 		return ret;
 	}
 	return 0;
@@ -3827,7 +3897,13 @@ static int __maybe_unused arm_smmu_pm_freeze_late(struct device *dev)
 	struct arm_smmu_device *smmu = dev_get_drvdata(dev);
 	struct arm_smmu_domain *smmu_domain;
 	struct arm_smmu_cb *cb;
-	int idx;
+	int idx, ret;
+
+	ret = arm_smmu_power_on(smmu->pwr);
+	if (ret) {
+		dev_err(smmu->dev, "Couldn't power on the smmu during pm freeze: %d\n", ret);
+		return ret;
+	}
 
 	for (idx = 0; idx < smmu->num_context_banks; idx++) {
 		cb = &smmu->cbs[idx];
@@ -3839,7 +3915,41 @@ static int __maybe_unused arm_smmu_pm_freeze_late(struct device *dev)
 			}
 		}
 	}
+	ret = arm_smmu_runtime_suspend(dev);
+	if (ret) {
+		dev_err(dev, "Failed to suspend\n");
+		return ret;
+	}
+	arm_smmu_power_off(smmu, smmu->pwr);
 	return 0;
+}
+
+static int __maybe_unused arm_smmu_pm_suspend(struct device *dev)
+{
+	int ret = 0;
+	struct arm_smmu_device *smmu = dev_get_drvdata(dev);
+
+	if (pm_suspend_target_state == PM_SUSPEND_MEM)
+		return arm_smmu_pm_freeze_late(dev);
+
+	if (pm_runtime_suspended(dev))
+		goto clk_unprepare;
+
+	ret = arm_smmu_runtime_suspend(dev);
+	if (ret)
+		return ret;
+
+clk_unprepare:
+	clk_bulk_unprepare(smmu->num_clks, smmu->clks);
+	return ret;
+}
+
+static int __maybe_unused arm_smmu_pm_resume(struct device *dev)
+{
+	if (pm_suspend_target_state == PM_SUSPEND_MEM)
+		return arm_smmu_pm_restore_early(dev);
+	else
+		return arm_smmu_pm_resume_common(dev);
 }
 
 static const struct dev_pm_ops arm_smmu_pm_ops = {

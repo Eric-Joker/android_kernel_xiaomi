@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (c) 2019-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2022-2023, Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) 2022-2024, Qualcomm Innovation Center, Inc. All rights reserved.
  */
 
 #ifndef _WALT_H
@@ -43,6 +43,7 @@
 #define MAX_MARGIN_LEVELS (MAX_CLUSTERS - 1)
 
 extern bool walt_disabled;
+extern bool waltgov_disabled;
 
 enum task_event {
 	PUT_PREV_TASK	= 0,
@@ -69,6 +70,7 @@ enum freq_caps {
 	PARTIAL_HALT_CAP,
 	SMART_FMAX_CAP,
 	HIGH_PERF_CAP,
+	FREQ_REL_CAP,
 	MAX_FREQ_CAP,
 };
 
@@ -147,8 +149,13 @@ struct walt_rq {
 	u64			last_cc_update;
 	u64			cycles;
 	u64			util;
+	/* MVP */
 	struct list_head	mvp_tasks;
 	int                     num_mvp_tasks;
+	u64			mvp_arrival_time; /* ts when 1st mvp task selected on this cpu */
+	u64			mvp_throttle_time; /* ts when mvp were throttled */
+	bool			skip_mvp;
+
 	u64			latest_clock;
 	u32			enqueue_counter;
 };
@@ -171,11 +178,21 @@ struct walt_sched_cluster {
 	u64			aggr_grp_load;
 	unsigned long		util_to_cost[1024];
 	u64			found_ts;
-	unsigned int		smart_fmax_cap;
+	int8_t			sibling_cluster;
 };
+
+struct freq_relation_map {
+	unsigned int src_freq;
+	unsigned int tgt_freq;
+	int target_cluster_cpu;
+};
+#define MAX_FREQ_RELATIONS     10
+#define TUPLE_SIZE     3
 
 extern struct walt_sched_cluster *sched_cluster[WALT_NR_CPUS];
 extern cpumask_t part_haltable_cpus;
+extern cpumask_t cpus_paused_by_us;
+extern cpumask_t cpus_part_paused_by_us;
 /*END SCHED.H PORT*/
 
 extern int num_sched_clusters;
@@ -216,6 +233,7 @@ extern int register_walt_callback(void);
 extern int input_boost_init(void);
 extern int core_ctl_init(void);
 extern void rebuild_sched_domains(void);
+void update_freq_relation(struct walt_sched_cluster *cluster);
 
 extern atomic64_t walt_irq_work_lastq_ws;
 extern unsigned int __read_mostly sched_ravg_window;
@@ -227,8 +245,9 @@ extern unsigned int __read_mostly sched_load_granule;
 #define SCHED_IDLE_ENOUGH_DEFAULT 30
 #define SCHED_CLUSTER_UTIL_THRES_PCT_DEFAULT 40
 
-extern unsigned int sysctl_sched_idle_enough[MAX_CLUSTERS];
-extern unsigned int sysctl_sched_cluster_util_thres_pct[MAX_CLUSTERS];
+
+extern unsigned int sysctl_sched_idle_enough_clust[MAX_CLUSTERS];
+extern unsigned int sysctl_sched_cluster_util_thres_pct_clust[MAX_CLUSTERS];
 
 /* 1ms default for 20ms window size scaled to 1024 */
 extern unsigned int sysctl_sched_min_task_util_for_boost;
@@ -280,7 +299,7 @@ extern unsigned int high_perf_cluster_freq_cap[MAX_CLUSTERS];
 extern unsigned int fmax_cap[MAX_FREQ_CAP][MAX_CLUSTERS];
 extern int sched_dynamic_tp_handler(struct ctl_table *table, int write,
 			void __user *buffer, size_t *lenp, loff_t *ppos);
-
+extern struct freq_relation_map relation_data[MAX_CLUSTERS][MAX_FREQ_RELATIONS];
 extern struct list_head cluster_head;
 #define for_each_sched_cluster(cluster) \
 	list_for_each_entry_rcu(cluster, &cluster_head, list)
@@ -349,6 +368,7 @@ extern char sched_lib_name[LIB_PATH_LENGTH];
 extern unsigned int sched_lib_mask_force;
 
 extern cpumask_t cpus_for_sbt_pause;
+extern unsigned int sysctl_sched_sbt_enable;
 extern unsigned int sysctl_sched_sbt_delay_windows;
 
 extern cpumask_t cpus_for_pipeline;
@@ -379,6 +399,7 @@ extern cpumask_t cpus_for_pipeline;
 #define CPUFREQ_REASON_SMART_FMAX_CAP	0x1000
 #define CPUFREQ_REASON_HIGH_PERF_CAP	0x2000
 #define CPUFREQ_REASON_PARTIAL_HALT_CAP	0x4000
+#define CPUFREQ_REASON_FREQ_REL_CAP	0x8000
 
 enum sched_boost_policy {
 	SCHED_BOOST_NONE,
@@ -611,8 +632,10 @@ static inline unsigned long capacity_of(int cpu)
 
 static inline bool __cpu_overutilized(int cpu, int delta)
 {
-	return (capacity_orig_of(cpu) * 1024) <
-		((cpu_util(cpu) + delta) * sched_capacity_margin_up[cpu]);
+	unsigned long cap = capacity_orig_of(cpu);
+
+	return cap ? ((cap * 1024) <
+			((cpu_util(cpu) + delta) * sched_capacity_margin_up[cpu])) : true;
 }
 
 static inline bool cpu_overutilized(int cpu)
@@ -779,8 +802,31 @@ static inline bool task_in_related_thread_group(struct task_struct *p)
 	return (rcu_access_pointer(wts->grp) != NULL);
 }
 
+bool walt_halt_check_last(int cpu);
+extern struct cpumask __cpu_halt_mask;
+extern struct cpumask __cpu_partial_halt_mask;
+
+#define cpu_halt_mask ((struct cpumask *)&__cpu_halt_mask)
+#define cpu_partial_halt_mask ((struct cpumask *)&__cpu_partial_halt_mask)
+
+/* a halted cpu must NEVER be used for tasks, as this is the thermal indication to avoid a cpu */
+#define cpu_halted(cpu) cpumask_test_cpu((cpu), cpu_halt_mask)
+
+/* a partially halted may be used for helping smaller cpus with small tasks */
+#define cpu_partial_halted(cpu) cpumask_test_cpu((cpu), cpu_partial_halt_mask)
+
+#define ASYMCAP_BOOST(cpu)	(sysctl_sched_asymcap_boost && \
+				!is_min_possible_cluster_cpu(cpu) && \
+				!cpu_partial_halted(cpu))
+
 static bool check_for_higher_capacity(int cpu1, int cpu2)
 {
+	if (cpu_partial_halted(cpu1) && is_min_possible_cluster_cpu(cpu2))
+		return false;
+
+	if (is_min_possible_cluster_cpu(cpu1) && cpu_partial_halted(cpu2))
+		return false;
+
 	return capacity_orig_of(cpu1) > capacity_orig_of(cpu2);
 }
 
@@ -842,6 +888,7 @@ extern void sched_update_hyst_times(void);
 extern void walt_rt_init(void);
 extern void walt_cfs_init(void);
 extern void walt_halt_init(void);
+extern void walt_mvp_lock_ordering_init(void);
 extern void walt_fixup_init(void);
 extern int walt_find_energy_efficient_cpu(struct task_struct *p, int prev_cpu,
 					int sync, int sibling_count_hint);
@@ -1001,26 +1048,12 @@ struct compute_energy_output {
 	unsigned int	cluster_first_cpu[MAX_CLUSTERS];
 };
 
-bool walt_halt_check_last(int cpu);
-extern struct cpumask __cpu_halt_mask;
-extern struct cpumask __cpu_partial_halt_mask;
-
-#define cpu_halt_mask ((struct cpumask *)&__cpu_halt_mask)
-#define cpu_partial_halt_mask ((struct cpumask *)&__cpu_partial_halt_mask)
-
-/* a halted cpu must NEVER be used for tasks, as this is the thermal indication to avoid a cpu */
-#define cpu_halted(cpu) cpumask_test_cpu((cpu), cpu_halt_mask)
-
-/* a partially halted may be used for helping smaller cpus with small tasks */
-#define cpu_partial_halted(cpu) cpumask_test_cpu((cpu), cpu_partial_halt_mask)
-
-#define ASYMCAP_BOOST(cpu)	(sysctl_sched_asymcap_boost && \
-				!is_min_possible_cluster_cpu(cpu) && \
-				!cpu_partial_halted(cpu))
-
 static inline bool is_state1(void)
 {
 	struct cpumask local_mask = { CPU_BITS_NONE };
+
+	if (!cpumask_weight(&part_haltable_cpus))
+		return false;
 
 	cpumask_or(&local_mask, cpu_partial_halt_mask, cpu_halt_mask);
 	return cpumask_subset(&part_haltable_cpus, &local_mask);
@@ -1058,9 +1091,9 @@ static inline int walt_find_and_choose_cluster_packing_cpu(int start_cpu, struct
 	int packing_cpu;
 
 	/* if idle_enough feature is not enabled */
-	if (!sysctl_sched_idle_enough[cluster->id])
+	if (!sysctl_sched_idle_enough_clust[cluster->id])
 		return -1;
-	if (!sysctl_sched_cluster_util_thres_pct[cluster->id])
+	if (!sysctl_sched_cluster_util_thres_pct_clust[cluster->id])
 		return -1;
 
 	/* find all unhalted active cpus */
@@ -1086,15 +1119,15 @@ static inline int walt_find_and_choose_cluster_packing_cpu(int start_cpu, struct
 
 	/* if cluster util is high */
 	if (sched_get_cluster_util_pct(cluster) >=
-	    sysctl_sched_cluster_util_thres_pct[cluster->id])
+	    sysctl_sched_cluster_util_thres_pct_clust[cluster->id])
 		return -1;
 
 	/* if cpu utilization is high */
-	if (cpu_util(packing_cpu) >= sysctl_sched_idle_enough[cluster->id])
+	if (cpu_util(packing_cpu) >= sysctl_sched_idle_enough_clust[cluster->id])
 		return -1;
 
 	/* don't pack big tasks */
-	if (task_util(p) >= sysctl_sched_idle_enough[cluster->id])
+	if (task_util(p) >= sysctl_sched_idle_enough_clust[cluster->id])
 		return -1;
 
 	if (task_reject_partialhalt_cpu(p, packing_cpu))
@@ -1116,32 +1149,24 @@ static inline bool has_internal_freq_limit_changed(struct walt_sched_cluster *cl
 	int i;
 
 	internal_freq = cluster->walt_internal_freq_limit;
-
 	cluster->walt_internal_freq_limit = cluster->max_freq;
-	for (i = 0; i < MAX_FREQ_CAP; i++)
-		cluster->walt_internal_freq_limit = min(fmax_cap[i][cluster->id],
+
+	if (likely(!waltgov_disabled)) {
+		for (i = 0; i < MAX_FREQ_CAP; i++)
+			cluster->walt_internal_freq_limit = min(fmax_cap[i][cluster->id],
 					     cluster->walt_internal_freq_limit);
+	}
+
 	return cluster->walt_internal_freq_limit != internal_freq;
 }
 
-static inline void update_smart_fmax_capacity(struct walt_sched_cluster *cluster)
-{
-	unsigned long fmax_capacity = arch_scale_cpu_capacity(cpumask_first(&cluster->cpus));
-
-	cluster->smart_fmax_cap = mult_frac(fmax_capacity,
-			fmax_cap[SMART_FMAX_CAP][cluster->id],
-						 cluster->max_possible_freq);
-}
-
-static inline void update_fmax_cap_capacities(int type)
+static inline void update_fmax_cap_capacities(void)
 {
 	struct walt_sched_cluster *cluster;
 	int cpu;
 
 	for_each_sched_cluster(cluster) {
 		if (has_internal_freq_limit_changed(cluster)) {
-			if (type == SMART_FMAX_CAP)
-				update_smart_fmax_capacity(cluster);
 			for_each_cpu(cpu, &cluster->cpus)
 				update_cpu_capacity_helper(cpu);
 		}

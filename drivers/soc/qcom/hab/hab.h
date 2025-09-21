@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
  * Copyright (c) 2016-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2022-2023 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  */
 #ifndef __HAB_H
 #define __HAB_H
@@ -22,6 +22,10 @@ enum hab_payload_type {
 	HAB_PAYLOAD_TYPE_SCHE_MSG_ACK,
 	HAB_PAYLOAD_TYPE_SCHE_RESULT_REQ,
 	HAB_PAYLOAD_TYPE_SCHE_RESULT_RSP,
+	HAB_PAYLOAD_TYPE_IMPORT,
+	HAB_PAYLOAD_TYPE_IMPORT_ACK,
+	HAB_PAYLOAD_TYPE_IMPORT_ACK_FAIL,
+	HAB_PAYLOAD_TYPE_UNIMPORT,
 	HAB_PAYLOAD_TYPE_MAX,
 };
 #define LOOPBACK_DOM 0xFF
@@ -62,6 +66,13 @@ enum hab_payload_type {
 #define DEVICE_XVM3_NAME "hab_xvm3"
 #define DEVICE_VNW1_NAME "hab_vnw1"
 #define DEVICE_EXT1_NAME "hab_ext1"
+#define DEVICE_EXT2_NAME "hab_ext2"
+#define DEVICE_EXT3_NAME "hab_ext3"
+#define DEVICE_GPCE1_NAME "hab_gpce1"
+#define DEVICE_SOCCP1_NAME "hab_soccp1"
+#define DEVICE_DPRX1_NAME "hab_dprx1"
+#define DEVICE_DPRX2_NAME "hab_dprx2"
+#define DEVICE_EVA1_NAME "hab_eva1"
 
 #define HABCFG_MMID_NUM        26
 #define HAB_MMID_ALL_AREA      0
@@ -99,11 +110,15 @@ enum hab_payload_type {
 #define HABCFG_BE_TRUE         1
 
 #define HABCFG_GET_VMID(_local_cfg_, _vmid_) \
-	((settings)->vmid_mmid_list[_vmid_].vmid)
+	((_local_cfg_)->vmid_mmid_list[_vmid_].vmid)
 #define HABCFG_GET_MMID(_local_cfg_, _vmid_, _mmid_) \
-	((settings)->vmid_mmid_list[_vmid_].mmid[_mmid_])
+	((_local_cfg_)->vmid_mmid_list[_vmid_].mmid[_mmid_])
 #define HABCFG_GET_BE(_local_cfg_, _vmid_, _mmid_) \
-	((settings)->vmid_mmid_list[_vmid_].is_listener[_mmid_])
+	((_local_cfg_)->vmid_mmid_list[_vmid_].is_listener[_mmid_])
+#define HABCFG_GET_KERNEL(_local_cfg_, _vmid_, _mmid_) \
+	((_local_cfg_)->vmid_mmid_list[_vmid_].kernel_only[_mmid_])
+#define HABCFG_GET_DMA_COHERENT(_local_cfg_, _vmid_, _mmid_grp_index_) \
+	((_local_cfg_)->vmid_mmid_list[_vmid_].dma_coherent[_mmid_grp_index_])
 
 struct hab_header {
 	uint32_t id_type;
@@ -115,6 +130,7 @@ struct hab_header {
 
 /* "Size" of the HAB_HEADER_ID and HAB_VCID_ID must match */
 #define HAB_HEADER_TYPE_SHIFT 16
+#define HAB_HEADER_EXT_TYPE_SHIFT 0
 #define HAB_HEADER_ID_SHIFT 20
 /*
  * On HQX platforms, the maximum payload size is
@@ -123,6 +139,9 @@ struct hab_header {
  */
 #define HAB_HEADER_SIZE_MAX  0x0007D000
 #define HAB_HEADER_TYPE_MASK 0x000F0000
+/* TYPE_LEN is the number of 1 bit in TYPE_MASK */
+#define HAB_HEADER_TYPE_LEN 4
+#define HAB_HEADER_EXT_TYPE_MASK 0x0000000F
 #define HAB_HEADER_ID_MASK   0xFFF00000
 #define HAB_HEADER_INITIALIZER {0}
 
@@ -147,9 +166,11 @@ struct hab_header {
 
 #define HAB_HEADER_SET_TYPE(header, type) \
 	((header).id_type = ((header).id_type & \
-			(~HAB_HEADER_TYPE_MASK)) | \
+			(~(HAB_HEADER_TYPE_MASK | HAB_HEADER_EXT_TYPE_MASK))) | \
 			(((type) << HAB_HEADER_TYPE_SHIFT) & \
-			HAB_HEADER_TYPE_MASK))
+			HAB_HEADER_TYPE_MASK) | \
+			((((type) >> HAB_HEADER_TYPE_LEN) << HAB_HEADER_EXT_TYPE_SHIFT) & \
+			HAB_HEADER_EXT_TYPE_MASK))
 
 #define HAB_HEADER_SET_ID(header, id) \
 	((header).id_type = ((header).id_type & \
@@ -161,8 +182,9 @@ struct hab_header {
 	((header).payload_size)
 
 #define HAB_HEADER_GET_TYPE(header) \
-	(((header).id_type & \
-		HAB_HEADER_TYPE_MASK) >> HAB_HEADER_TYPE_SHIFT)
+	((((header).id_type & \
+		HAB_HEADER_TYPE_MASK) >> HAB_HEADER_TYPE_SHIFT) | \
+		(((header).id_type & HAB_HEADER_EXT_TYPE_MASK) << HAB_HEADER_TYPE_LEN))
 
 #define HAB_HEADER_GET_ID(header) \
 	((((header).id_type & HAB_HEADER_ID_MASK) >> \
@@ -172,6 +194,13 @@ struct hab_header {
 
 #define HAB_HS_TIMEOUT (10*1000*1000)
 #define HAB_HEAD_SIGNATURE 0xBEE1BEE1
+
+/* only used when vchan is not existed */
+#define HAB_VCID_UNIMPORT 0x1
+#define HAB_SESSIONID_UNIMPORT 0x1
+
+/* 1 - enhanced memory sharing protocol with sync import and async unimport */
+#define HAB_VER_PROT 1
 
 struct physical_channel {
 	struct list_head node;
@@ -204,6 +233,8 @@ struct physical_channel {
 	struct list_head vchannels;
 	int vcnt;
 	rwlock_t vchans_lock;
+	int kernel_only;
+	uint32_t mem_proto;
 };
 /* this payload has to be used together with type */
 struct hab_open_send_data {
@@ -212,7 +243,7 @@ struct hab_open_send_data {
 	int open_id;
 	int ver_fe;
 	int ver_be;
-	int reserved;
+	int ver_proto;
 };
 
 struct hab_open_request {
@@ -239,6 +270,25 @@ struct hab_export_ack_recvd {
 	int age;
 };
 
+struct hab_import_ack {
+	uint32_t export_id;
+	int32_t vcid_local;
+	int32_t vcid_remote;
+	uint32_t imp_whse_added; /* indicating exp node added into imp whse */
+};
+
+struct hab_import_ack_recvd {
+	struct hab_import_ack ack;
+	struct list_head node;
+	int age;
+};
+
+struct hab_import_data {
+	uint32_t exp_id;
+	uint32_t page_cnt;
+	uint32_t reserved;
+} __packed;
+
 struct hab_message {
 	struct list_head node;
 	size_t sizebytes;
@@ -260,24 +310,43 @@ struct hab_device {
 	int openq_cnt;
 };
 
+struct virq_uhab_context {
+	struct list_head node; /* managed by the driver */
+	struct kref refcount;
+
+	/* keeps track of virq setup per context */
+	struct list_head virq;
+	int virq_total;
+
+	rwlock_t ctx_lock;
+
+	int kernel;
+	int owner;
+};
+
 struct uhab_context {
 	struct list_head node; /* managed by the driver */
 	struct kref refcount;
+	struct work_struct destroy_work;
 
 	struct list_head vchannels;
 	int vcnt;
 
 	struct list_head exp_whse;
+	rwlock_t exp_lock;
 	uint32_t export_total;
 
 	wait_queue_head_t exp_wq;
 	struct list_head exp_rxq;
-	rwlock_t exp_lock;
 	spinlock_t expq_lock;
 
-	struct list_head imp_whse;
+	HAB_RB_ROOT imp_whse;
 	spinlock_t imp_lock;
 	uint32_t import_total;
+
+	wait_queue_head_t imp_wq;
+	struct list_head imp_rxq;
+	spinlock_t impq_lock;
 
 	void *import_ctx;
 
@@ -288,6 +357,15 @@ struct uhab_context {
 	int closing;
 	int kernel;
 	int owner;
+	/*
+	 * For user-space hab client
+	 * if created through /dev/hab-* node, mmid_grp_index = MMID / 100
+	 * if created through /dev/hab node, mmid_grp_index = 0
+	 *
+	 * For kernel hab client
+	 * mmid_grp_index is always 0 as only one single kctx is shared with clients in kernel
+	 */
+	int mmid_grp_index;
 
 	int lb_be; /* loopback only */
 };
@@ -300,6 +378,8 @@ struct vmid_mmid_desc {
 	int vmid; /* remote vmid  */
 	int mmid[HABCFG_MMID_AREA_MAX+1]; /* selected or not */
 	int is_listener[HABCFG_MMID_AREA_MAX+1]; /* yes or no */
+	int kernel_only[HABCFG_MMID_AREA_MAX+1]; /* yes or no */
+	bool dma_coherent[HABCFG_MMID_AREA_MAX+1];
 };
 
 struct local_vmid {
@@ -308,21 +388,31 @@ struct local_vmid {
 };
 
 struct hab_driver {
-	struct device *dev; /* mmid dev list */
-	struct cdev cdev;
+	/* hab driver has many char devices, so we need an array of struct device pointers. */
+	struct device **dev;
+	struct cdev *cdev;
 	dev_t major;
 	struct class *class;
+
 	int ndevices;
 	struct hab_device *devp;
 	struct uhab_context *kctx;
+	struct virq_uhab_context *kvirq_ctx;
 
 	struct list_head uctx_list;
 	int ctx_cnt;
+	struct list_head virq_uctx_list;
+	int virq_ctx_cnt;
+
 	spinlock_t drvlock;
 
 	struct list_head imp_list;
 	int imp_cnt;
 	spinlock_t imp_lock;
+
+	struct list_head reclaim_list;
+	spinlock_t reclaim_lock;
+	struct work_struct reclaim_work;
 
 	struct local_vmid settings; /* parser results */
 
@@ -333,6 +423,8 @@ struct hab_driver {
 	void *hyp_priv; /* hypervisor plug-in storage */
 
 	void *hab_vmm_handle;
+
+	int hab_init_success;
 };
 
 struct virtual_channel {
@@ -362,8 +454,8 @@ struct virtual_channel {
 	int closed;
 	int forked; /* if fork is detected and assume only once */
 	/* stats */
-	uint64_t tx_cnt; /* total succeeded tx */
-	uint64_t rx_cnt; /* total succeeded rx */
+	atomic64_t tx_cnt; /* total succeeded tx */
+	atomic64_t rx_cnt; /* total succeeded rx */
 	int rx_inflight; /* rx in progress/blocking */
 };
 
@@ -389,15 +481,73 @@ struct export_desc {
 
 	struct list_head    node;
 	void *kva;
-	int                 payload_count;
+	int                 payload_count; /* number of the pages */
 	unsigned char       payload[1];
 } __packed;
+
+/*
+ * hab_mem_import       hab_mem_unimport
+ * --------------       ----------------
+ *      lock                 lock
+ *      query                query
+ *      unlock               unlock
+ *
+ *      use                  free
+ *
+ *      ret                  ret
+ *
+ * There are three scenarios to handle.
+ * First is:
+ * 1.thread1 enters import and finds out the exp desc, then unlock,
+ * 2.thread2 is scheduled to run on the same CPU,
+ * 3.it enters unimport, finds out the same exp desc, frees it and returns,
+ * 4.cpu is back to run thread1,
+ * 5.UAF occurs once thread1 uses this exp desc.
+ * We could use EXP_DESC_IMPORTED at the end of import and add query check
+ * in unimport to sync this access.
+ * A more complicated case is:
+ * 1.thread1 has completed the import,
+ * 2.thread2 enters import and gets the exp desc,
+ * 3.at this time point, thread3 which calls unimport could find out this
+ * exp desc due to its current state is EXP_DESC_IMPORTED,
+ * 4.if thread3 frees it, thread2 uses it afterward, will also occur UAF.
+ * Add query check with EXP_DESC_IMPORTED in import could avoid this,
+ * but it can not deal with the 3rd scenario:
+ * 1.thread1 and thread2 call import and both find out this exp desc,
+ * 2.thread1 runs quickly and returns from import,
+ * 3.then thread3 calls unimport and frees the exp desc,
+ * 4.UAF occurs once thread2 uses this exp desc afterward.
+ * In import, querying exp desc is a critical section, should prevent
+ * thread2 entering if thread1 is in. so EXP_DESC_IMPORTING is here.
+ */
+enum exp_desc_state {
+	EXP_DESC_INIT,
+	EXP_DESC_IMPORTING,	/* hab_mem_import is in progress */
+	EXP_DESC_IMPORTED,	/* hab_mem_import is called and returns success */
+};
+
+enum export_state {
+	HAB_EXP_EXPORTING,
+	HAB_EXP_SUCCESS,
+};
 
 struct export_desc_super {
 	struct kref refcount;
 	void *platform_data;
 	unsigned long offset;
-	struct export_desc  exp;
+	unsigned int payload_size; /* size of the compressed pfn structure */
+
+	enum exp_desc_state import_state;
+	enum export_state exp_state;
+	uint32_t remote_imported;
+
+	HAB_RB_ENTRY node;
+
+	/*
+	 * exp must be the last member
+	 * because it is a variable length struct with pfns as payload
+	 */
+	struct export_desc exp;
 };
 
 int hab_vchan_open(struct uhab_context *ctx,
@@ -459,6 +609,7 @@ int habmem_hyp_grant(struct virtual_channel *vchan,
 		int *compressed_size,
 		int *export_id);
 
+void habmem_defer_unimp_sent(struct export_desc *export);
 int habmem_hyp_revoke(void *expdata, uint32_t count);
 int habmem_exp_release(struct export_desc_super *exp_super);
 
@@ -468,7 +619,7 @@ void habmem_imp_hyp_close(void *priv, int kernel);
 int habmem_imp_hyp_map(void *imp_ctx, struct hab_import *param,
 		struct export_desc *exp, int kernel);
 
-int habmm_imp_hyp_unmap(void *imp_ctx, struct export_desc *exp, int kernel);
+int habmm_imp_hyp_unmap(void *imp_ctx, struct export_desc *exp, long fcnt_idle);
 
 int habmem_imp_hyp_mmap(struct file *flip, struct vm_area_struct *vma);
 
@@ -496,7 +647,8 @@ int hab_open_listen(struct uhab_context *ctx,
 		struct hab_device *dev,
 		struct hab_open_request *listen,
 		struct hab_open_request **recv_request,
-		int ms_timeout);
+		int ms_timeout,
+		uint32_t flags);
 
 struct virtual_channel *hab_vchan_alloc(struct uhab_context *ctx,
 		struct physical_channel *pchan, int openid);
@@ -519,6 +671,9 @@ struct uhab_context *hab_ctx_alloc(int kernel);
 
 void hab_ctx_free(struct kref *ref);
 
+void hab_ctx_free_fn(struct uhab_context *ctx);
+void hab_ctx_free_os(struct kref *ref);
+
 static inline void hab_ctx_get(struct uhab_context *ctx)
 {
 	if (ctx)
@@ -532,8 +687,10 @@ static inline void hab_ctx_put(struct uhab_context *ctx)
 }
 
 void hab_send_close_msg(struct virtual_channel *vchan);
+void hab_send_unimport_msg(struct virtual_channel *vchan, uint32_t exp_id);
 
 int hab_hypervisor_register(void);
+int hab_hypervisor_register_post(void);
 int hab_hypervisor_register_os(void);
 int hab_hypervisor_unregister_os(void);
 void hab_hypervisor_unregister(void);
@@ -550,7 +707,8 @@ int physical_channel_read(struct physical_channel *pchan,
 
 int physical_channel_send(struct physical_channel *pchan,
 		struct hab_header *header,
-		void *payload);
+		void *payload,
+		unsigned int flags);
 
 void physical_channel_rx_dispatch(unsigned long physical_channel);
 void physical_channel_rx_dispatch_common(unsigned long physical_channel);
@@ -591,6 +749,8 @@ int hab_stat_deinit(struct hab_driver *drv);
 int hab_stat_show_vchan(struct hab_driver *drv, char *buf, int sz);
 int hab_stat_show_ctx(struct hab_driver *drv, char *buf, int sz);
 int hab_stat_show_expimp(struct hab_driver *drv, int pid, char *buf, int sz);
+int hab_stat_show_reclaim(struct hab_driver *drv, char *buf, int sz);
+int hab_stat_show_virq(struct hab_driver *drv, char *buf, int sz);
 int hab_stat_init_sub(struct hab_driver *drv);
 int hab_stat_deinit_sub(struct hab_driver *drv);
 
@@ -610,17 +770,17 @@ static inline void hab_spin_unlock(spinlock_t *lock, int irqs_disabled)
 		spin_unlock_bh(lock);
 }
 
-static inline void hab_write_lock(rwlock_t *lock, int irqs_disabled)
+static inline void hab_write_lock(rwlock_t *lock, int no_touch_bh)
 {
-	if (irqs_disabled)
+	if (no_touch_bh)
 		write_lock(lock);
 	else
 		write_lock_bh(lock);
 }
 
-static inline void hab_write_unlock(rwlock_t *lock, int irqs_disabled)
+static inline void hab_write_unlock(rwlock_t *lock, int no_touch_bh)
 {
-	if (irqs_disabled)
+	if (no_touch_bh)
 		write_unlock(lock);
 	else
 		write_unlock_bh(lock);
@@ -640,4 +800,9 @@ int hab_stat_log(struct physical_channel **pchans, int pchan_cnt, char *dest,
 			int dest_size);
 int hab_stat_buffer_print(char *dest,
 		int dest_size, const char *fmt, ...);
+int hab_create_cdev_node(int mmid_grp_index);
+
+struct export_desc_super *hab_rb_exp_insert(struct rb_root *root, struct export_desc_super *exp_s);
+struct export_desc_super *hab_rb_exp_find(struct rb_root *root, struct export_desc_super *key);
+
 #endif /* __HAB_H */

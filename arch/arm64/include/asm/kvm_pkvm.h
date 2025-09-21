@@ -110,12 +110,14 @@ void pkvm_host_reclaim_page(struct kvm *host_kvm, phys_addr_t ipa);
  * - Distinction between Secure and Non-secure Memory
  * - Mixed-endian at EL0 only
  * - Non-context synchronizing exception entry and exit
+ * - 16Kb stage-1 granule support
  */
 #define PVM_ID_AA64MMFR0_ALLOW (\
 	ARM64_FEATURE_MASK(ID_AA64MMFR0_EL1_BIGEND) | \
 	ARM64_FEATURE_MASK(ID_AA64MMFR0_EL1_SNSMEM) | \
 	ARM64_FEATURE_MASK(ID_AA64MMFR0_EL1_BIGENDEL0) | \
-	ARM64_FEATURE_MASK(ID_AA64MMFR0_EL1_EXS) \
+	ARM64_FEATURE_MASK(ID_AA64MMFR0_EL1_EXS) | \
+	ARM64_FEATURE_MASK(ID_AA64MMFR0_EL1_TGRAN16) \
 	)
 
 /*
@@ -412,12 +414,6 @@ static inline size_t pkvm_host_fp_state_size(void)
 		       SVE_SIG_REGS_SIZE(sve_vq_from_vl(kvm_host_sve_max_vl)));
 	else
 		return sizeof(struct user_fpsimd_state);
-}
-
-static inline unsigned long hyp_host_fp_pages(unsigned long nr_cpus)
-{
-	return PAGE_ALIGN(size_mul(nr_cpus, pkvm_host_fp_state_size())) >>
-		PAGE_SHIFT;
 }
 
 #endif	/* __ARM64_KVM_PKVM_H__ */

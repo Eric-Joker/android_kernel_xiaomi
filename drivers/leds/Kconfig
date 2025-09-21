@@ -97,6 +97,7 @@ config LEDS_ARIEL
 config LEDS_AW2013
 	tristate "LED support for Awinic AW2013"
 	depends on LEDS_CLASS && I2C && OF
+	select REGMAP_I2C
 	help
 	  This option enables support for the AW2013 3-channel
 	  LED driver.
@@ -211,6 +212,28 @@ config LEDS_LM3533
 	  ambient-light-sensor interface. The chip supports
 	  hardware-accelerated blinking with maximum on and off periods of 9.8
 	  and 77 seconds respectively.
+
+config LEDS_LM3535
+	tristate "IR LED driver for LM3535"
+	select REGMAP_I2C
+	depends on LEDS_CLASS
+	depends on I2C
+	help
+	  This option enables support for the IR LED using
+	  LM3532 ambient light sensor chip. This chip can be
+	  controlled with camera strobe signal and able to control
+	  brightness with i2c writes.
+
+config LEDS_LM36011
+	tristate "IR LED driver for LM36011"
+	select REGMAP_I2C
+	depends on LEDS_CLASS
+	depends on I2C
+	help
+	  This option enables support for the IR LED using
+	  LM36011 ambient light sensor chip. This chip can be
+	  controlled with camera strobe signal and able to control
+	  brightness with i2c writes.
 
 config LEDS_LM3642
 	tristate "LED support for LM3642 Chip"
@@ -850,7 +873,7 @@ config LEDS_SPI_BYTE
 config LEDS_TI_LMU_COMMON
 	tristate "LED driver for TI LMU"
 	depends on LEDS_CLASS
-	depends on REGMAP
+	select REGMAP
 	help
 	  Say Y to enable the LED driver for TI LMU devices.
 	  This supports common features between the TI LM3532, LM3631, LM3632,

@@ -32,13 +32,19 @@ static void enter_vmid_context(struct kvm_s2_mmu *mmu,
 	 * to do.
 	 */
 	if (vcpu) {
+		/* We're in guest context */
 		if (mmu == vcpu->arch.hw_mmu || WARN_ON(mmu != host_s2_mmu))
 			return;
-	} else if (mmu == host_s2_mmu) {
-		return;
+
+		cxt->mmu = vcpu->arch.hw_mmu;
+	} else {
+		/* We're in host context */
+		if (mmu == host_s2_mmu)
+			return;
+
+		cxt->mmu = host_s2_mmu;
 	}
 
-	cxt->mmu = mmu;
 	if (cpus_have_final_cap(ARM64_WORKAROUND_SPECULATIVE_AT)) {
 		u64 val;
 
@@ -100,10 +106,10 @@ static void exit_vmid_context(struct tlb_inv_context *cxt)
 	else
 		__load_host_stage2();
 
-	if (cpus_have_final_cap(ARM64_WORKAROUND_SPECULATIVE_AT)) {
-		/* Ensure write of the old VMID */
-		isb();
+	/* Ensure write of the old VMID */
+	isb();
 
+	if (cpus_have_final_cap(ARM64_WORKAROUND_SPECULATIVE_AT)) {
 		if (!(cxt->sctlr & SCTLR_ELx_M)) {
 			write_sysreg_el1(cxt->sctlr, SYS_SCTLR);
 			isb();

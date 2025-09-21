@@ -1,16 +1,37 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2016-2021, The Linux Foundation. All rights reserved.
- * Copyright (c) 2022-2023 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  */
 #include "hab.h"
 #include <linux/fdtable.h>
 #include <linux/dma-buf.h>
 #include "hab_grantable.h"
 
+#define VFIO_DEV_DT_NAME "vfio_"
+
 enum hab_page_list_type {
+	/*
+	 * Use this type when dmabuf is created by habmm_import()
+	 */
 	HAB_PAGE_LIST_IMPORT = 0x1,
-	HAB_PAGE_LIST_EXPORT
+	/*
+	 * Use this type when dmabuf is created when hab_mem_export() is called
+	 * with the "kernel" parameter is TRUE and w/o HABMM_EXPIMP_FLAGS_DMABUF
+	 * and HABMM_EXPIMP_FLAGS_FD flag
+	 */
+	HAB_PAGE_LIST_EXPORT_KERNEL,
+	/*
+	 * Use this type when dmabuf is created when hab_mem_export() is called
+	 * with the "kernel" parameter is FALSE and w/o HABMM_EXP_MEM_TYPE_DMA
+	 * and HABMM_EXPIMP_FLAGS_FD flag
+	 */
+	HAB_PAGE_LIST_EXPORT_USER
+};
+
+enum unimp_msg_sent_timing {
+	UNIMP_CALL = 0x0, /* unimport msg sent when imp_hyp_unmap return success */
+	PGLIST_DESTROY    /* unimport msg sent when dma-buf file release is triggered */
 };
 
 struct pages_list {
@@ -23,6 +44,7 @@ struct pages_list {
 	int32_t vcid;
 	struct physical_channel *pchan;
 	uint32_t type;
+	enum unimp_msg_sent_timing unimp_timing;
 	struct kref refcount;
 };
 
@@ -133,8 +155,11 @@ static void pages_list_remove(struct pages_list *pglist)
 
 static void pages_list_destroy(struct kref *refcount)
 {
+	int i = 0;
+	int ret;
 	struct pages_list *pglist = container_of(refcount,
 				struct pages_list, refcount);
+	struct hab_header header = HAB_HEADER_INITIALIZER;
 
 	if (pglist->vmapping) {
 		vunmap(pglist->vmapping);
@@ -144,9 +169,27 @@ static void pages_list_destroy(struct kref *refcount)
 	/* the imported pages used, notify the remote */
 	if (pglist->type == HAB_PAGE_LIST_IMPORT)
 		pages_list_remove(pglist);
+	else if (pglist->type == HAB_PAGE_LIST_EXPORT_USER) {
+		for (i = 0; i < pglist->npages; i++)
+			put_page(pglist->pages[i]);
+	}
+
+	if (pglist->unimp_timing == PGLIST_DESTROY) {
+		HAB_HEADER_SET_TYPE(header, HAB_PAYLOAD_TYPE_UNIMPORT);
+		HAB_HEADER_SET_SIZE(header, sizeof(uint32_t));
+		HAB_HEADER_SET_ID(header, HAB_VCID_UNIMPORT);
+		HAB_HEADER_SET_SESSION_ID(header, HAB_SESSIONID_UNIMPORT);
+		ret = physical_channel_send(pglist->pchan, &header, &pglist->export_id,
+				HABMM_SOCKET_SEND_FLAGS_NON_BLOCKING);
+		if (ret)
+			pr_err("unimp msg sent fail %d, vcid %x, expid %d, pg nr %ld\n",
+				ret, pglist->vcid, pglist->export_id, pglist->npages);
+		else
+			pr_debug("unimp msg sent, expid %d, vcid %x, pg nr %ld\n",
+				pglist->export_id, pglist->vcid, pglist->npages);
+	}
 
 	vfree(pglist->pages);
-
 	kfree(pglist);
 }
 
@@ -180,6 +223,19 @@ static struct pages_list *pages_list_lookup(
 	spin_unlock_bh(&hab_driver.imp_lock);
 
 	return NULL;
+}
+
+void habmem_defer_unimp_sent(struct export_desc *export)
+{
+	struct dma_buf *dmabuf;
+	struct pages_list *pglist;
+
+	dmabuf = (struct dma_buf *)export->kva;
+	pglist = (struct pages_list *)dmabuf->priv;
+	pglist->unimp_timing = PGLIST_DESTROY;
+
+	/* decrease the file counter added by hab import from user space */
+	dma_buf_put(dmabuf);
 }
 
 static int match_file(const void *p, struct file *file, unsigned int fd)
@@ -235,7 +291,8 @@ static struct dma_buf *habmem_get_dma_buf_from_uva(unsigned long address,
 		int page_count)
 {
 	struct page **pages = NULL;
-	int i, ret = 0;
+	struct vm_area_struct *vma = NULL;
+	int i, ret, page_nr = 0;
 	struct dma_buf *dmabuf = NULL;
 	struct pages_list *pglist = NULL;
 	DEFINE_DMA_BUF_EXPORT_INFO(exp_info);
@@ -254,20 +311,46 @@ static struct dma_buf *habmem_get_dma_buf_from_uva(unsigned long address,
 
 	mmap_read_lock(current->mm);
 
-	ret = get_user_pages(address, page_count, 0, pages, NULL);
+	/*
+	 * Need below sanity checks:
+	 * 1. input uva is covered by an existing VMA of the current process
+	 * 2. the given uva range is fully covered in the same VMA
+	 */
+	vma = vma_lookup(current->mm, address);
+	if (!range_in_vma(vma, address, address + page_count * PAGE_SIZE)) {
+		mmap_read_unlock(current->mm);
+		pr_err("input uva [0x%lx, 0x%lx) not covered in one VMA. UVA or size(%d) is invalid\n",
+			address, address + page_count * PAGE_SIZE, page_count * PAGE_SIZE);
+		ret = -EINVAL;
+		goto err;
+	}
+	page_nr = get_user_pages(address, page_count, 0, pages, NULL);
 
 	mmap_read_unlock(current->mm);
 
-	if (ret <= 0) {
+	if (page_nr <= 0) {
 		ret = -EINVAL;
 		pr_err("get %d user pages failed %d\n",
-			page_count, ret);
+			page_count, page_nr);
+		goto err;
+	}
+
+	/*
+	 * The actual number of the pinned pages is returned by get_user_pages.
+	 * It may not match with the requested number.
+	 */
+	if (page_nr != page_count) {
+		ret = -EINVAL;
+		pr_err("input page cnt %d not match with pinned %d\n", page_count, page_nr);
+		for (i = 0; i < page_nr; i++)
+			put_page(pages[i]);
+
 		goto err;
 	}
 
 	pglist->pages = pages;
 	pglist->npages = page_count;
-	pglist->type = HAB_PAGE_LIST_EXPORT;
+	pglist->type = HAB_PAGE_LIST_EXPORT_USER;
 
 	kref_init(&pglist->refcount);
 
@@ -284,6 +367,7 @@ static struct dma_buf *habmem_get_dma_buf_from_uva(unsigned long address,
 		ret = PTR_ERR(dmabuf);
 		goto err;
 	}
+
 	return dmabuf;
 
 err:
@@ -295,7 +379,8 @@ err:
 static int habmem_compress_pfns(
 		struct export_desc_super *exp_super,
 		struct compressed_pfns *pfns,
-		uint32_t *data_size)
+		uint32_t *data_size,
+		int dev_idx)
 {
 	int ret = 0;
 	struct exp_platform_data *platform_data =
@@ -317,18 +402,25 @@ static int habmem_compress_pfns(
 	if (IS_ERR_OR_NULL(dmabuf) || !pfns || !data_size)
 		return -EINVAL;
 
-	pr_debug("page_count %d\n", page_count);
+	pr_debug("dmabuf size: %u, page_count: %d\n", dmabuf->size, page_count);
+
+	if (dmabuf->size < (page_count * PAGE_SIZE)) {
+		pr_err("given dmabuf size %u less than expected, page cnt %d\n",
+			dmabuf->size, page_count);
+		dump_stack();
+		return -EINVAL;
+	}
 
 	/* DMA buffer from fd */
 	if (dmabuf->ops != &dma_buf_ops) {
-		attach = dma_buf_attach(dmabuf, hab_driver.dev);
+		attach = dma_buf_attach(dmabuf, hab_driver.dev[dev_idx]);
 		if (IS_ERR_OR_NULL(attach)) {
 			pr_err("dma_buf_attach failed %d\n", -EBADF);
 			ret = -EBADF;
 			goto err;
 		}
 
-		sg_table = dma_buf_map_attachment(attach, DMA_TO_DEVICE);
+		sg_table = dma_buf_map_attachment(attach, DMA_BIDIRECTIONAL);
 		if (IS_ERR_OR_NULL(sg_table)) {
 			pr_err("dma_buf_map_attachment failed %d\n", -EBADF);
 			ret = -EBADF;
@@ -411,7 +503,7 @@ err:
 		if (!IS_ERR_OR_NULL(sg_table))
 			dma_buf_unmap_attachment(attach,
 					sg_table,
-					DMA_TO_DEVICE);
+					DMA_BIDIRECTIONAL);
 		dma_buf_detach(dmabuf, attach);
 	}
 
@@ -463,22 +555,31 @@ static int habmem_add_export_compress(struct virtual_channel *vchan,
 	kref_init(&exp_super->refcount);
 
 	pfns = (struct compressed_pfns *)&exp->payload[0];
-	ret = habmem_compress_pfns(exp_super, pfns, payload_size);
+	/*
+	 * always use the mmid group specific device to attach to the dma-buf
+	 * the mmid_grp_index in ctx cannot be used because:
+	 * 1. It cannot distinguish if the client is in the kernel or accessed from /dev/hab due to
+	 *    lack of permission to the specific /dev/hab-xxx entry (fallback).
+	 * 2. The dma_coherent attribute cannot be managed per MMID group.
+	 */
+	ret = habmem_compress_pfns(exp_super, pfns, payload_size, (vchan->pchan->habdev->id / 100));
 	if (ret) {
 		pr_err("hab compressed pfns failed %d\n", ret);
 		*payload_size = 0;
 		goto err_compress_pfns;
 	}
 
+	exp_super->payload_size = *payload_size;
 	*export_id = exp->export_id;
 	return 0;
 
 err_compress_pfns:
 	kfree(platform_data);
 err_alloc:
-	spin_lock(&vchan->pchan->expid_lock);
+	spin_lock_bh(&vchan->pchan->expid_lock);
 	idr_remove(&vchan->pchan->expid_idr, exp->export_id);
-	spin_unlock(&vchan->pchan->expid_lock);
+	spin_unlock_bh(&vchan->pchan->expid_lock);
+
 	vfree(exp_super);
 err_add_exp:
 	dma_buf_put((struct dma_buf *)buf);
@@ -571,7 +672,7 @@ int habmem_hyp_grant(struct virtual_channel *vchan,
 
 		pglist->pages = pages;
 		pglist->npages = page_count;
-		pglist->type = HAB_PAGE_LIST_EXPORT;
+		pglist->type = HAB_PAGE_LIST_EXPORT_KERNEL;
 		pglist->pchan = vchan->pchan;
 		pglist->vcid = vchan->id;
 
@@ -629,7 +730,7 @@ int habmem_exp_release(struct export_desc_super *exp_super)
 			if (!IS_ERR_OR_NULL(sg_table))
 				dma_buf_unmap_attachment(attach,
 						sg_table,
-						DMA_TO_DEVICE);
+						DMA_BIDIRECTIONAL);
 			dma_buf_detach(dmabuf, attach);
 		}
 		dma_buf_put(dmabuf);
@@ -692,14 +793,34 @@ static struct sg_table *hab_mem_map_dma_buf(
 		sg_set_page(sg, pages[i], PAGE_SIZE, 0);
 	}
 
+	if (strstr(dev_name(attachment->dev), VFIO_DEV_DT_NAME)) {
+		pr_debug("detect %s for dma map %ld nent %ld pages\n",
+			dev_name(attachment->dev), sgt->nents, pglist->npages);
+		ret = dma_map_sg(attachment->dev, sgt->sgl, sgt->nents,
+				direction);
+		if (!ret) {
+			pr_err("kiumd map dmabuf failed %ld nent\n",
+				sgt->nents);
+			sg_free_table(sgt);
+			kfree(sgt);
+			sgt = NULL;
+		} else
+			pr_debug("dma map OK nent old %ld new %ld\n", sgt->nents,
+				ret);
+	}
+
 	return sgt;
 }
-
 
 static void hab_mem_unmap_dma_buf(struct dma_buf_attachment *attachment,
 	struct sg_table *sgt,
 	enum dma_data_direction direction)
 {
+	if (strstr(dev_name(attachment->dev), VFIO_DEV_DT_NAME)) {
+		dma_unmap_sg(attachment->dev, sgt->sgl, sgt->nents, direction);
+		pr_debug("%s kiumd dma unmap done\n", dev_name(attachment->dev));
+	}
+
 	sg_free_table(sgt);
 	kfree(sgt);
 }
@@ -910,6 +1031,53 @@ buffer_ready:
 	return dmabuf;
 }
 
+/*
+ * dma_buf is created here during hab import.
+ * Below are the typical lifecycles of the dma_buf file.
+ *
+ * From khab:
+ *
+ * - [HAB driver] initialized in habmem_imp_hyp_map (1) -----------------------------|
+ * - [HAB client] usage in kernel by HAB client, ex. smmu map (1 -> 2) -----------|  |
+ * - [HAB client] usage finish, ex. smmu unmap (2 -> 1) --------------------------|  |
+ * - [HAB driver] habmm_unimport called from HAB client                              |
+ * - [HAB driver] dma_buf_put in habmem_imp_hyp_unmap (1 -> 0) ----------------------|
+ *
+ * or
+ *
+ * - [HAB driver] initialized in habmem_imp_hyp_map (1) -----------------------------|
+ * - [HAB client] alloc fd for the dma-buf file                                      |
+ * - [HAB client] increase dma-buf file count (1 -> 2) ---------------------------|  |
+ * - [HAB client] share it to user space                                          |  |
+ * - [HAB client] im/explicitly close fd via close or process gone (2 -> 1) ------|  |
+ * - [HAB driver] habmm_unimport called from HAB client                              |
+ * - [HAB driver] dma_buf_put in habmem_imp_hyp_unmap (1 -> 0) ----------------------|
+ *
+ * From uhab:
+ *
+ * - [HAB driver] initialized in habmem_imp_hyp_map (1) =============================|
+ * - [HAB driver] alloc fd                                                           |
+ * - [HAB driver] increase the file count in habmem_imp_hyp_map (1 -> 2) ---------|  |
+ * - [uhab]       return fd to HAB client                                         |  |
+ * - [HAB client] usage in user space, ex. mmap (2 -> 3) ----------------------|  |  |
+ * - [HAB client] usage finish, ex. munmap (3 -> 2) ---------------------------|  |  |
+ * - [HAB driver] habmm_unimport called from HAB client                           |  |
+ * - [HAB driver] dma_buf_put in habmem_imp_hyp_unmap (2 -> 1) ======================|
+ * - [uhab]       close fd (1 -> 0) ----------------------------------------------|
+ *
+ * or
+ *
+ * - [HAB driver] initialized in habmem_imp_hyp_map (1) =============================|
+ * - [HAB driver] alloc fd                                                           |
+ * - [HAB driver] increase the file count in habmem_imp_hyp_map (1 -> 2) ---------|  |
+ * - [uhab]       return fd to HAB client                                         |  |
+ * - [HAB client] usage in user space, ex. mmap (2 -> 3) -------------------------|  |
+ * - [HAB client] process exit/crash/get killed without unimp and munmap          |  |
+ * - [kernel]     cleanup process resource(close fd, unmap) (3 -> 1) -------------|  |
+ * - [HAB driver] hab_ctx_free to cleanup resources                                  |
+ * - [HAB driver] dma_buf_put in habmem_imp_hyp_unmap (1 -> 0) ======================|
+ *
+ */
 int habmem_imp_hyp_map(void *imp_ctx, struct hab_import *param,
 		struct export_desc *exp, int kernel)
 {
@@ -931,16 +1099,81 @@ int habmem_imp_hyp_map(void *imp_ctx, struct hab_import *param,
 			return -EINVAL;
 		}
 		param->kva = (uint64_t)fd;
+		/*
+		 * Additionally increase the count by one if import request is from user space.
+		 * Because HAB driver allocates a fd for the client. Without the additional file
+		 * count, once the dma-buf is exposed to user space through fd, there will be a
+		 * chance that the file count can be decreased via fd closure or kernel cleanup
+		 * due to process crash/exits.
+		 *
+		 * This decreasing will trigger dma-buf release.
+		 *
+		 * To ensure the dma-buf is still available for further usage in HAB driver,
+		 * ex. busy check during unimport, HAB driver always increases the count by one in
+		 * this case.
+		 *
+		 * Meanwhile, increasing the file count by one is not applicable to the khab
+		 * scenario. Because it cannot prevent use-after-free from happening if HAB
+		 * client in kernel violates the HAB AoU, ex.
+		 * 1. misuse the dma_buf_put()
+		 * 2. alloc fd and share it to user space while not increasing the file count
+		 * the dma-buf may be reclaimed before the last dma_buf_put() in HAB driver which is
+		 * the expected last one to decrease the file cnt from 1 to 0.
+		 *
+		 * TODO: Once the weak semantic of hab unimport is supported, HAB driver will not
+		 * access the dma-buf after import except in dma-buf release callback.
+		 * Thus, the below get_file can be removed.
+		 */
+		get_file(dma_buf->file);
 	}
+	exp->kva = dma_buf;
+
 	return 0;
 }
 
-int habmm_imp_hyp_unmap(void *imp_ctx, struct export_desc *exp, int kernel)
+int habmm_imp_hyp_unmap(void *imp_ctx, struct export_desc *exp, long fcnt_idle)
 {
-	/* dma_buf is the only supported format in khab */
-	if (kernel)
-		dma_buf_put((struct dma_buf *)exp->kva);
-	return 0;
+	int ret = 0;
+	struct dma_buf *buf;
+	long cnt;
+
+	buf = (struct dma_buf *)exp->kva;
+	if (buf == NULL)
+		ret = -EINVAL;
+	else {
+		/*
+		* mmap/sharing fd would increase the file count.
+		* A file with its count value higher than expected indicates that the
+		* memory is still in use out there.
+		* In the current design, strong unimport semantic, HAB unimport invoker should
+		* ensure the memory is not in use anymore before calling unimport.
+		*
+		* Thus, HAB driver can check the memory in use status by reading the dma-buf file
+		* count. Meanwhile, HAB driver/uhab is the last one to decrease count from 1 to 0.
+		* HAB driver then can notify the remote OS that the buf is not needed by the local
+		* OS. The unimport message is sent immediately, rather than waiting for the dma-buf
+		* file release, if the current function returned successfully.
+		* It ensures all of the unimport actions are finished as early as possible because
+		* the file release callback is usually deferred.
+		*/
+		cnt = file_count(buf->file);
+		if (cnt > fcnt_idle) {
+			ret = -EBUSY;
+			pr_err("the buf (exp id %u) still in use on %x, refcnt %ld, expect %d\n",
+				exp->export_id, exp->vcid_local, cnt, fcnt_idle);
+		} else if (cnt < fcnt_idle) {
+			ret = -ENOENT;
+			pr_err("the dmabuf (exp id %u) cnt is invalid %ld, expect %d, vcid %X\n",
+			    exp->export_id, cnt, fcnt_idle, exp->vcid_local);
+		} else {
+			exp->kva = NULL;
+			dma_buf_put(buf);
+			pr_debug("dmabuf put for exp id %d on %x\n",
+				exp->export_id, exp->vcid_local);
+		}
+	}
+
+	return ret;
 }
 
 int habmem_imp_hyp_mmap(struct file *filp, struct vm_area_struct *vma)

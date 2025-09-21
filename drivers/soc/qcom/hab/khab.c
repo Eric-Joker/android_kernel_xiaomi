@@ -1,14 +1,21 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * Copyright (c) 2016-2020, The Linux Foundation. All rights reserved.
- * Copyright (c) 2022-2023 Qualcomm Innovation Center, Inc. All rights reserved.
+ * Copyright (c) Qualcomm Technologies, Inc. and/or its subsidiaries.
  */
-#include "hab.h"
 #include <linux/module.h>
+#include "hab.h"
+#include "hab_virq.h"
 
 int32_t habmm_socket_open(int32_t *handle, uint32_t mm_ip_id,
 		uint32_t timeout, uint32_t flags)
 {
+	while (unlikely(!READ_ONCE(hab_driver.hab_init_success))) {
+		pr_info_once("opening on mmid %d when hab has not completed init\n",
+					mm_ip_id);
+		schedule();
+	}
+
 	return hab_vchan_open(hab_driver.kctx, mm_ip_id, handle,
 				timeout, flags);
 }
@@ -16,6 +23,15 @@ EXPORT_SYMBOL(habmm_socket_open);
 
 int32_t habmm_socket_close(int32_t handle)
 {
+	/*
+	 * The ctx_lock read-side path calls frequently, while the
+	 * write-side path calls less. In order to avoid disabling
+	 * bh on the read side of ctx_lock, do not support calling
+	 * this function in interrupt context. Otherwise you may
+	 * run into serious deadlock issues.
+	 */
+	WARN_ON(in_irq() || in_serving_softirq());
+
 	return hab_vchan_close(hab_driver.kctx, handle);
 }
 EXPORT_SYMBOL(habmm_socket_close);
@@ -167,3 +183,17 @@ int32_t habmm_socket_query(int32_t handle,
 	return ret;
 }
 EXPORT_SYMBOL(habmm_socket_query);
+
+int32_t habmm_virq_register(int32_t *handle, uint32_t vmid, uint32_t virq_num,
+		virq_rx_cb_t rx_cb, void *rx_priv, uint32_t flags)
+{
+	return hab_virq_register(hab_driver.kvirq_ctx, handle, vmid, virq_num,
+			rx_cb, rx_priv, flags);
+}
+EXPORT_SYMBOL_GPL(habmm_virq_register);
+
+int32_t habmm_virq_unregister(int32_t handle, uint32_t flags)
+{
+	return hab_virq_unregister(hab_driver.kvirq_ctx, handle, flags);
+}
+EXPORT_SYMBOL_GPL(habmm_virq_unregister);

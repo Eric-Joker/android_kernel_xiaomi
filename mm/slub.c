@@ -43,6 +43,7 @@
 
 #include <linux/debugfs.h>
 #include <trace/events/kmem.h>
+#include <trace/hooks/mm.h>
 
 #include "internal.h"
 
@@ -1823,6 +1824,8 @@ static inline struct slab *alloc_slab_page(gfp_t flags, int node,
 	if (page_is_pfmemalloc(folio_page(folio, 0)))
 		slab_set_pfmemalloc(slab);
 
+	trace_android_vh_slab_folio_alloced(order, flags);
+
 	return slab;
 }
 
@@ -3417,6 +3420,8 @@ redo:
 out:
 	slab_post_alloc_hook(s, objcg, gfpflags, 1, &object, init);
 
+	trace_android_vh_slab_alloc_node(object, addr, s);
+
 	return object;
 }
 
@@ -3680,6 +3685,9 @@ static __always_inline void slab_free(struct kmem_cache *s, struct slab *slab,
 	 */
 	if (slab_free_freelist_hook(s, &head, &tail, &cnt))
 		do_slab_free(s, slab, head, tail, cnt, addr);
+
+	trace_android_vh_slab_free(addr, s);
+
 }
 
 #ifdef CONFIG_KASAN_GENERIC

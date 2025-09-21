@@ -8,12 +8,13 @@
 #ifndef _XHCI_PLAT_H
 #define _XHCI_PLAT_H
 
-#include "xhci.h"	/* for hcd_to_xhci() */
+struct device;
+struct platform_device;
+struct usb_hcd;
 
 struct xhci_plat_priv {
 	const char *firmware_name;
 	unsigned long long quirks;
-	struct xhci_vendor_ops *vendor_ops;
 	struct xhci_vendor_data *vendor_data;
 	int (*plat_setup)(struct usb_hcd *);
 	void (*plat_start)(struct usb_hcd *);
