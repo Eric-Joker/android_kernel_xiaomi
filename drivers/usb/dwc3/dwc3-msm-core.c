@@ -7394,7 +7394,7 @@ static int dwc3_otg_start_host(struct dwc3_msm *mdwc, int on)
 
 		 /* disable host gen2 */
 		platform_id = get_hw_version_platform();
-		if (platform_id == HARDWARE_PROJECT_N3) {
+		if (platform_id == HARDWARE_PROJECT_N2 || platform_id == HARDWARE_PROJECT_7 || platform_id == HARDWARE_PROJECT_N3 || platform_id == HARDWARE_PROJECT_11) {
 			dwc3_msm_write_reg_field(mdwc->base, USB3_PRI_LINK_REGS_LLUCTL(0), FORCE_GEN1_MASK, 1);
 			dev_info(mdwc->dev, "Turn on host: Force gen1");
 		}
