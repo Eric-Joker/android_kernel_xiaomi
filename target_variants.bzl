@@ -14,18 +14,17 @@ target_arch_map = {
 
 la_targets = [
     # keep sorted
-    "anorak",
-    "autoghgvm",
+    # "anorak",
     "autogvm",
     "blair",
     "gen3auto",
-    "neo-la",
-    "niobe",
+    # "neo-la",
+    # "niobe",
     "pineapple",
     "pitti",
     "sdmsteppeauto",
     "manet",
-    "seraph",
+    # "seraph",
 ]
 
 la_variants = [
@@ -49,7 +48,7 @@ lxc_targets = [
 
 le_32_targets = [
     # keep sorted
-    "mdm9607",
+    # "mdm9607",
 ]
 
 le_32_variants = [
@@ -84,9 +83,9 @@ vm_types = [
     "oemvm",
 ]
 
-niobe_vm_types = [
-    "tuivm",
-]
+# niobe_vm_types = [
+#     "tuivm",
+# ]
 
 vm_type_opt1 = [
     "tuivm",
@@ -94,7 +93,7 @@ vm_type_opt1 = [
 
 vm_target_bases = {
     "pineapple": vm_types,
-    "niobe": niobe_vm_types,
+    # "niobe": niobe_vm_types,
     "seraph": vm_type_opt1,
 }
 

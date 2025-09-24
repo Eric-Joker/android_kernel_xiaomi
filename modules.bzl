@@ -8,6 +8,11 @@ This module contains a full list of kernel modules
 
 _COMMON_GKI_MODULES_LIST = [
     # keep sorted
+    "drivers/block/zram/zram.ko",
+    "net/ipv4/tcp_bic.ko",
+    "mm/zsmalloc.ko",
+    "net/ipv4/tcp_htcp.ko",
+
     "drivers/bluetooth/btbcm.ko",
     "drivers/bluetooth/btqca.ko",
     "drivers/bluetooth/btsdio.ko",

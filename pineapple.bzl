@@ -340,7 +340,7 @@ def define_pineapple():
             msm_target = target_name,
             msm_arch = target_arch,
             variant = variant,
-            in_tree_module_list = mod_list,
+            in_tree_module_list = list(mod_list),
             boot_image_opts = boot_image_opts(
                 kernel_vendor_cmdline_extras = kernel_vendor_cmdline_extras,
                 board_kernel_cmdline_extras = board_kernel_cmdline_extras,

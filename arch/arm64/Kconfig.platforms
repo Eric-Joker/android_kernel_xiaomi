@@ -260,22 +260,22 @@ config ARCH_PINEAPPLE
 	  chipset. If you do not wish to build a kernel that runs on this
 	  chipset or if you are unsure, say 'N' here.
 
-config ARCH_NIOBE
-        bool "Enable support for Qualcomm Technologies, Inc. Niobe"
-        depends on ARCH_QCOM
-        help
-          This enables support for Qualcomm Technologies, Inc. Niobe
-          chipset. If you do not wish to build a kernel that runs on this
-          chipset or if you are unsure, say 'N' here.
+# config ARCH_NIOBE
+#        bool "Enable support for Qualcomm Technologies, Inc. Niobe"
+#        depends on ARCH_QCOM
+#        help
+#          This enables support for Qualcomm Technologies, Inc. Niobe
+#          chipset. If you do not wish to build a kernel that runs on this
+#          chipset or if you are unsure, say 'N' here.
 
-config ARCH_SERAPH
-        bool "Enable support for Qualcomm Technologies, Inc. Seraph"
-        depends on ARCH_QCOM
-        help
-          This enables support for Qualcomm Technologies, Inc. Seraph
-          chipset. If you do not wish to build a kernel that runs on this
-          chipset or if you are unsure,
-          say 'N' here.
+# config ARCH_SERAPH
+#         bool "Enable support for Qualcomm Technologies, Inc. Seraph"
+#         depends on ARCH_QCOM
+#         help
+#           This enables support for Qualcomm Technologies, Inc. Seraph
+#           chipset. If you do not wish to build a kernel that runs on this
+#           chipset or if you are unsure,
+#           say 'N' here.
 
 config ARCH_MONACO_AUTO
         bool "Enable Support for Qualcomm Technologies, Inc. MONACO_AUTO"
@@ -376,21 +376,21 @@ config QTI_QUIN_GVM
 	  kernel that runs this configuration or if you are unsure,
 	  say 'N' here.
 
-config ARCH_ANORAK
-	bool "Enable Support for Qualcomm Technologies, Inc. ANORAK"
-	depends on ARCH_QCOM
-	help
-	  This enables support for the Qualcomm Technologies, Inc.'s
-	  ANORAK chipset. If you do not wish to build a kernel that
-	  runs on this chipset or if you are unsure, say 'N' here.
+# config ARCH_ANORAK
+# 	bool "Enable Support for Qualcomm Technologies, Inc. ANORAK"
+# 	depends on ARCH_QCOM
+# 	help
+# 	  This enables support for the Qualcomm Technologies, Inc.'s
+# 	  ANORAK chipset. If you do not wish to build a kernel that
+# 	  runs on this chipset or if you are unsure, say 'N' here.
 
-config ARCH_NEO
-	bool "Enable Support for Qualcomm Technologies, Inc. NEO"
-	depends on ARCH_QCOM
-	help
-	  This enables support for the Qualcomm Technologies, Inc.'s
-	  NEO chipset. If you do not wish to build a kernel that
-	  runs on this chipset or if you are unsure, say 'N' here.
+# config ARCH_NEO
+# 	bool "Enable Support for Qualcomm Technologies, Inc. NEO"
+# 	depends on ARCH_QCOM
+# 	help
+# 	  This enables support for the Qualcomm Technologies, Inc.'s
+# 	  NEO chipset. If you do not wish to build a kernel that
+# 	  runs on this chipset or if you are unsure, say 'N' here.
 
 config ARCH_MXR
 	bool "Enable Google MXR Platforms"

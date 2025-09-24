@@ -12,7 +12,7 @@ import sys
 import subprocess
 
 HOST_TARGETS = ["dtc"]
-DEFAULT_SKIP_LIST = ["abi"]
+DEFAULT_SKIP_LIST = ["abi", "abl"]
 MSM_EXTENSIONS = "build/msm_kernel_extensions.bzl"
 ABL_EXTENSIONS = "build/abl_extensions.bzl"
 DEFAULT_MSM_EXTENSIONS_SRC = "../msm-kernel/msm_kernel_extensions.bzl"
@@ -307,6 +307,7 @@ class BazelBuilder:
           logging.info('The target_build_variant = %s', self.target_build_variant)
 
         self.user_opts.extend([
+            "--define=FACTORY_BUILD=0",
             "--user_kmi_symbol_lists=//msm-kernel:android/abi_gki_aarch64_qcom",
             "--ignore_missing_projects",
         ])
@@ -357,7 +358,7 @@ def main():
     parser.add_argument(
         "--log",
         metavar="LEVEL",
-        default="info",
+        default="debug",
         choices=["debug", "info", "warning", "error"],
         help="Log level (debug, info, warning, error)",
     )

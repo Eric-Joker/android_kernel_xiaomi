@@ -29,7 +29,7 @@ load(":dpm_image.bzl", "define_dpm_image")
 load(":image_opts.bzl", "boot_image_opts")
 load(":modules.bzl", "COMMON_GKI_MODULES_LIST")
 load(":merge_list_files.bzl", "merge_list_files")
-load(":modules_unprotected.bzl", "get_unprotected_vendor_modules_list")
+# load(":modules_unprotected.bzl", "get_unprotected_vendor_modules_list")
 load(":msm_abl.bzl", "define_abl_dist")
 load(":msm_common.bzl", "define_top_level_config", "gen_config_without_source_lines", "get_out_dir")
 load(":msm_dtc.bzl", "define_dtc_dist")
@@ -149,21 +149,24 @@ def _define_kernel_build(
     if dtbo_list:
         out_list += dtbo_list
 
+    """
     common_gki_mod_list = [] + COMMON_GKI_MODULES_LIST
     for mod in get_unprotected_vendor_modules_list(msm_target):
-        common_gki_mod_list.remove(mod)
+        if mod in common_gki_mod_list:
+            common_gki_mod_list.remove(mod)
+    """
 
     kernel_build(
         name = target,
         module_outs = in_tree_module_list,
-        module_implicit_outs = common_gki_mod_list,
+        # module_implicit_outs = common_gki_mod_list,
+        module_implicit_outs = COMMON_GKI_MODULES_LIST,
         outs = out_list,
         build_config = ":{}_build_config".format(target),
         dtstree = dtstree,
         base_kernel = base_kernel,
         kmi_symbol_list = "android/abi_gki_aarch64_qcom" if define_abi_targets else None,
         additional_kmi_symbol_lists = ["{}_all_kmi_symbol_lists".format(base_kernel)] if define_abi_targets else None,
-        protected_exports_list = "android/abi_gki_protected_exports_aarch64" if define_abi_targets else None,
         protected_modules_list = "android/gki_aarch64_protected_modules" if define_abi_targets else None,
         collect_unstripped_modules = define_abi_targets,
         visibility = ["//visibility:public"],
@@ -389,9 +392,11 @@ def _define_kernel_dist(
         ":{}_system_dlkm_module_blocklist".format(target),
     ])
 
+    """
     vendor_unprotected_dlkm = " ".join(get_unprotected_vendor_modules_list(msm_target))
     if vendor_unprotected_dlkm:
         msm_dist_targets.extend(["{}_vendor_dlkm_module_unprotectedlist".format(target)])
+    """
 
     msm_dist_targets.append("{}_avb_sign_boot_image".format(target))
 
@@ -501,12 +506,13 @@ def define_msm_la(
     vendor_ramdisk_binaries = get_vendor_ramdisk_binaries(target)
     gki_ramdisk_prebuilt_binary = get_gki_ramdisk_prebuilt_binary()
     build_config_fragments = get_build_config_fragments(msm_target)
-    vendor_dlkm_module_unprotected_list = get_unprotected_vendor_modules_list(msm_target)
+    # vendor_dlkm_module_unprotected_list = get_unprotected_vendor_modules_list(msm_target)
 
     # Can't enable dpm_overlay if no overlays are listed
     if len(dtbo_list) == 0 and dpm_overlay:
         dpm_overlay = False
 
+    """
     vendor_unprotected_dlkm = " ".join(vendor_dlkm_module_unprotected_list)
     if vendor_unprotected_dlkm:
         write_file(
@@ -517,6 +523,7 @@ def define_msm_la(
 
     if vendor_dlkm_module_unprotected_list:
         in_tree_module_list += vendor_dlkm_module_unprotected_list
+    """
 
     _define_build_config(
         msm_target,
