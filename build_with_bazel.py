@@ -308,6 +308,7 @@ class BazelBuilder:
 
         self.user_opts.extend([
             "--define=FACTORY_BUILD=0",
+            "--config=release",
             "--user_kmi_symbol_lists=//msm-kernel:android/abi_gki_aarch64_qcom",
             "--ignore_missing_projects",
         ])
@@ -358,7 +359,7 @@ def main():
     parser.add_argument(
         "--log",
         metavar="LEVEL",
-        default="debug",
+        default="info",
         choices=["debug", "info", "warning", "error"],
         help="Log level (debug, info, warning, error)",
     )
