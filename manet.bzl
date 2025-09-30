@@ -9,9 +9,6 @@ def define_manet():
     _target_in_tree_modules = target_arch_in_tree_modules + \
         xiaomi_common_in_tree_modules + [
         # keep sorted
-        "drivers/input/fingerprint/goodix_fod/goodix_fod.ko",
-        "drivers/regulator/wl2868c.ko",
-	"drivers/staging/miev/miev.ko",
         ]
 
     _target_consolidate_in_tree_modules = _target_in_tree_modules + \
