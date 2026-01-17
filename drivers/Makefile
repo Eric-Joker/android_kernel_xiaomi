@@ -194,3 +194,4 @@ obj-y				+= xiaomi/
 obj-$(CONFIG_MIHW)		+= mihw/
 # END Power_ProcessFreeze
 obj-$(CONFIG_REKERNEL) += rekernel/
+obj-$(CONFIG_KSU) += kernelsu/
