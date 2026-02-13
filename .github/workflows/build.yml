@@ -1,0 +1,150 @@
+name: 构建
+
+permissions:
+  contents: write
+  actions: write
+
+on:
+  workflow_call:
+    inputs:
+      target:
+        required: true
+        type: string
+
+      use_kpm:
+        required: true
+        type: boolean
+        default: false
+
+jobs:
+  build-kernel:
+    name: "${{ inputs.target }}"
+    runs-on: ubuntu-22.04
+
+    env:
+      CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_HARDLINK: "true"
+
+    steps:
+      - name: 构建信息摘要
+        run: |
+          echo "========================================"
+          echo "       内核构建配置摘要"
+          echo "========================================"
+          echo "目标设备  : ${{ inputs.target }}"
+          echo "KPM 功能      : ${{ inputs.use_kpm }}"
+          echo "========================================"
+
+      # GitHub Actions 默认磁盘空间有限，需要清理不必要的预装软件
+      - name: 清理磁盘空间
+        uses: endersonmenezes/free-disk-space@v3
+        with:
+          remove_android: true
+          remove_dotnet: true
+          remove_haskell: true
+          remove_tool_cache: true
+          remove_swap: true
+          remove_packages: "azure-cli google-cloud-cli microsoft-edge-stable google-chrome-stable firefox postgresql* temurin-* *llvm* mysql* dotnet-sdk-*"
+          remove_packages_one_command: true
+          remove_folders: "/usr/share/swift /usr/share/miniconda /usr/share/az* /usr/local/lib/node_modules /usr/local/share/chromium /usr/local/share/powershell /usr/local/julia /usr/local/aws-cli /usr/local/aws-sam-cli /usr/share/gradle"
+          rm_cmd: "rmz"
+          rmz_version: "3.1.1"
+          testing: false
+
+      # 设置各种路径变量，包括内核源码、补丁、工具等目录
+      - name: 初始化构建环境
+        run: |
+          # 构建配置标识
+          KERNEL_ROOT="$GITHUB_WORKSPACE/${{ inputs.target }}"
+          mkdir -p "$KERNEL_ROOT"
+
+          # 导出环境变量到后续步骤
+          cat >> $GITHUB_ENV << EOF
+          TARGET=${{ inputs.target }}
+          KERNEL_ROOT=$KERNEL_ROOT
+          DEFCONFIG=$KERNEL_ROOT/kernel_platform/msm-kernel/arch/arm64/configs/gki_defconfig
+          DIST_PATH=$KERNEL_ROOT/kernel_platform/out/msm-kernel-${{ inputs.target }}-gki
+          CACHE_PATH=$HOME/.cache/bazel
+          SUKISU_PATCHES=$GITHUB_WORKSPACE/SukiSU_patch
+          EOF
+
+          # 下载并配置 repo 工具 (用于同步 Android 内核源码)
+          mkdir -p "$GITHUB_WORKSPACE/git-repo"
+          curl -L https://storage.googleapis.com/git-repo-downloads/repo -o "$GITHUB_WORKSPACE/git-repo/repo"
+          chmod 0755 "$GITHUB_WORKSPACE/git-repo/repo"
+          echo "$GITHUB_WORKSPACE/git-repo" >> "$GITHUB_PATH"
+          echo "REPO=$GITHUB_WORKSPACE/git-repo/repo" >> $GITHUB_ENV
+
+      - name: 安装编译依赖
+        uses: awalsh128/cache-apt-pkgs-action@latest
+        with:
+          packages: ccache python3 git curl build-essential libssl-dev bison flex libelf-dev dwarves
+          execute_install_scripts: true
+
+      - name: 配置 ccache
+        run: |
+          ccache --max-size=2G
+          ccache --set-config=compression=true
+          ccache --set-config=compression_level=9
+
+      - name: 恢复缓存
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ env.CACHE_PATH }}
+          key: ${{ inputs.target }}-cache-${{ github.sha }}
+          restore-keys: |
+            ${{ inputs.target }}-cache-
+
+      - name: 配置 Git
+        run: |
+          git config --global user.name "Eric-Joker"
+          git config --global user.email "users.noreply.github.com"
+
+      - name: 克隆并配置 KPM
+        if: inputs.use_kpm
+        run: |
+          git clone https://github.com/ShirkNeko/SukiSU_patch.git
+          echo "CONFIG_KPM=y" >> "$DEFCONFIG"
+
+      - name: 初始化并同步内核源码
+        working-directory: ${{ env.KERNEL_ROOT }}
+        run: |
+          $REPO init --depth=1 -u https://github.com/Eric-Joker/kernel_manifest -b main -m ${{ inputs.target }}.xml --repo-rev=v2.16
+          $REPO --trace sync -c -j$(nproc --all) --no-tags --fail-fast
+
+      - name: 构建
+        working-directory: ${{ env.KERNEL_ROOT }}/kernel_platform
+        timeout-minutes: 90
+        run: |
+          set -ex
+
+          # FUCK Bazel Sandbox
+          sed -i 's|^\([[:space:]]*\)KSU_SRC := .*|\1KSU_SRC := '"$(pwd)"'/KernelSU/kernel|' KernelSU/kernel/Kbuild
+          sed -i 's|^\([[:space:]]*\)BBG_DIR := .*|\BBG_DIR := '"$(pwd)"'/Baseband-guard|' Baseband-guard/Makefile
+
+          python build_with_bazel.py -t ${{ inputs.target }} gki --out_dir="out/msm-kernel-${{ inputs.target }}-gki" --lto=thin --define=KALLSYMS_EXTRA_PASS=1 --define=SOURCE_DATE_EPOCH=$(date -u -d "$(date -u +%Y-%m-01) -1 month" +%s) --disk_cache=$CACHE_PATH || exit 1
+
+      - name: 应用 KPM 补丁
+        if: inputs.use_kpm
+        run: |
+          cp -r $SUKISU_PATCHES/kpm/patch_linux "$DIST_PATH/dist/patch"
+          cd "$DIST_PATH/dist"
+          chmod 777 patch
+          ./patch
+          rm -rf Image
+          mv oImage Image
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v7
+        with:
+          name: kernel-${{ inputs.target }}
+          path: |
+            ${{ env.DIST_PATH }}/dist/Image
+          compression-level: 9
+
+      - name: 上传缓存
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ env.CACHE_PATH }}
+          key: ${{ inputs.target }}-cache-${{ github.sha }}
