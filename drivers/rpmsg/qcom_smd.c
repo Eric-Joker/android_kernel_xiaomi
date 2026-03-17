@@ -775,7 +775,7 @@ static int __qcom_smd_send(struct qcom_smd_channel *channel, const void *data,
 	__le32 hdr[5] = { cpu_to_le32(len), };
 	int tlen = (channel->is_pkt_ch) ? sizeof(hdr) + len : len;
 	unsigned long flags;
-	int ret;
+	int ret = 0;
 
 	/* Word aligned channels only accept word size aligned data */
 	if (channel->info_word && len % 4)
@@ -1524,7 +1524,21 @@ static void qcom_smd_edge_release(struct device *dev)
 	struct qcom_smd_edge *edge = to_smd_edge(dev);
 
 	list_for_each_entry_safe(channel, tmp, &edge->channels, list) {
+
+		/* Wake all waiters */
+		wake_up_interruptible_all(&channel->fblockread_event);
+		wake_up_interruptible_all(&channel->state_change_event);
+
 		list_del(&channel->list);
+
+		/*
+		 * Ensure woken threads complete poll cleanup before freeing memory.
+		 * On single-CPU systems like MDM9607, wake_up_interruptible_all()
+		 * only marks threads runnable but doesn't immediately schedule them.
+		 * synchronize_rcu() provides a scheduling point via might_sleep().
+		 */
+		synchronize_rcu();
+
 		kfree(channel->name);
 		kfree(channel);
 	}
